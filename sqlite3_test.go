@@ -1115,7 +1115,7 @@ func TestQueryer(t *testing.T) {
 		t.Error("Failed to call db.Exec:", err)
 	}
 	rows, err := db.Query(`
-		select id from foo order by id;
+		select id from foo order by id; -- #1 harmless comment
 	`)
 	if err != nil {
 		t.Error("Failed to call db.Query:", err)
@@ -1128,10 +1128,13 @@ func TestQueryer(t *testing.T) {
 		if err != nil {
 			t.Error("Failed to db.Query:", err)
 		}
-		if id != n + 1 {
+		if id != n+1 {
 			t.Error("Failed to db.Query: not matched results")
 		}
 		n = n + 1
+		if n > 3 {
+			t.Fatal("Too many errors:", n)
+		}
 	}
 	if err := rows.Err(); err != nil {
 		t.Errorf("Post-scan failed: %v\n", err)
