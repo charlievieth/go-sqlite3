@@ -79,6 +79,43 @@ _sqlite3_exec(sqlite3* db, const char* pcmd, long long* rowid, long long* change
   return rv;
 }
 
+typedef enum {
+  GO_SQLITE3_TYPE_NONE,
+  GO_SQLITE3_TYPE_DATETIME,
+  GO_SQLITE3_TYPE_BOOLEAN
+} go_sqlite3_decl_type;
+
+void _sqlite3_set_column_decltype_internal(sqlite3_stmt* stmt, uint8_t *decls) {
+  int n = sqlite3_column_count(stmt);
+  for (int i = 0; i < n; i++) {
+    uint8_t decl = GO_SQLITE3_TYPE_NONE;
+    const char *typ = sqlite3_column_decltype(stmt, i);
+    if (typ != NULL) {
+      switch (typ[0]) {
+      case 'B':
+      case 'b':
+        if (sqlite3_stricmp(typ, "boolean") == 0) {
+          decl = GO_SQLITE3_TYPE_BOOLEAN;
+        }
+        break;
+      case 'D':
+      case 'd':
+        if (sqlite3_stricmp(typ, "date") == 0 || sqlite3_stricmp(typ, "datetime") == 0) {
+          decl = GO_SQLITE3_TYPE_DATETIME;
+        }
+        break;
+      case 'T':
+      case 't':
+        if (sqlite3_stricmp(typ, "timestamp") == 0) {
+          decl = GO_SQLITE3_TYPE_DATETIME;
+        }
+        break;
+      }
+    }
+    decls[i] = decl;
+  }
+}
+
 #ifdef SQLITE_ENABLE_UNLOCK_NOTIFY
 extern int _sqlite3_step_blocking(sqlite3_stmt *stmt);
 extern int _sqlite3_step_row_blocking(sqlite3_stmt* stmt, long long* rowid, long long* changes);
@@ -133,7 +170,6 @@ void _sqlite3_result_text(sqlite3_context* ctx, const char* s) {
 void _sqlite3_result_blob(sqlite3_context* ctx, const void* b, int l) {
   sqlite3_result_blob(ctx, b, l, SQLITE_TRANSIENT);
 }
-
 
 int _sqlite3_create_function(
   sqlite3 *db,
@@ -227,12 +263,6 @@ var SQLiteTimestampFormats = []string{
 	"2006-01-02T15:04",
 	"2006-01-02",
 }
-
-const (
-	columnDate      string = "date"
-	columnDatetime  string = "datetime"
-	columnTimestamp string = "timestamp"
-)
 
 // This variable can be replaced with -ldflags like below:
 // go build -ldflags="-X 'github.com/mattn/go-sqlite3.driverName=my-sqlite3'"
@@ -381,13 +411,14 @@ type SQLiteResult struct {
 
 // SQLiteRows implements driver.Rows.
 type SQLiteRows struct {
-	s        *SQLiteStmt
-	nc       int
-	cols     []string
-	decltype []string
-	cls      bool
-	closed   bool
-	ctx      context.Context // no better alternative to pass context into Next() method
+	s         *SQLiteStmt
+	nc        int
+	cdecltype []uint8
+	cols      []string
+	decltype  []string
+	cls       bool
+	closed    bool
+	ctx       context.Context // no better alternative to pass context into Next() method
 }
 
 type functionInfo struct {
@@ -2134,7 +2165,19 @@ func (rc *SQLiteRows) Columns() []string {
 	return rc.cols
 }
 
-func (rc *SQLiteRows) declTypes() []string {
+func (rc *SQLiteRows) cdeclTypes() []uint8 {
+	if rc.s.s != nil && rc.cdecltype == nil {
+		rc.cdecltype = make([]uint8, rc.nc)
+		C._sqlite3_set_column_decltype_internal(rc.s.s,
+			(*C.uint8_t)(unsafe.Pointer(&rc.cdecltype[0])))
+	}
+	return rc.cdecltype
+}
+
+// DeclTypes return column types.
+func (rc *SQLiteRows) DeclTypes() []string {
+	rc.s.mu.Lock()
+	defer rc.s.mu.Unlock()
 	if rc.s.s != nil && rc.decltype == nil {
 		rc.decltype = make([]string, rc.nc)
 		for i := 0; i < rc.nc; i++ {
@@ -2142,13 +2185,6 @@ func (rc *SQLiteRows) declTypes() []string {
 		}
 	}
 	return rc.decltype
-}
-
-// DeclTypes return column types.
-func (rc *SQLiteRows) DeclTypes() []string {
-	rc.s.mu.Lock()
-	defer rc.s.mu.Unlock()
-	return rc.declTypes()
 }
 
 // Next move cursor to next. Attempts to honor context timeout from QueryContext call.
@@ -2196,14 +2232,14 @@ func (rc *SQLiteRows) nextSyncLocked(dest []driver.Value) error {
 		return nil
 	}
 
-	rc.declTypes()
+	rc.cdeclTypes()
 
 	for i := range dest {
 		switch C.sqlite3_column_type(rc.s.s, C.int(i)) {
 		case C.SQLITE_INTEGER:
 			val := int64(C.sqlite3_column_int64(rc.s.s, C.int(i)))
-			switch rc.decltype[i] {
-			case columnTimestamp, columnDatetime, columnDate:
+			switch rc.cdecltype[i] {
+			case C.GO_SQLITE3_TYPE_DATETIME:
 				var t time.Time
 				// Assume a millisecond unix timestamp if it's 13 digits -- too
 				// large to be a reasonable timestamp in seconds.
@@ -2218,7 +2254,7 @@ func (rc *SQLiteRows) nextSyncLocked(dest []driver.Value) error {
 					t = t.In(rc.s.c.loc)
 				}
 				dest[i] = t
-			case "boolean":
+			case C.GO_SQLITE3_TYPE_BOOLEAN:
 				dest[i] = val > 0
 			default:
 				dest[i] = val
@@ -2242,8 +2278,8 @@ func (rc *SQLiteRows) nextSyncLocked(dest []driver.Value) error {
 			n := int(C.sqlite3_column_bytes(rc.s.s, C.int(i)))
 			s := C.GoStringN((*C.char)(unsafe.Pointer(C.sqlite3_column_text(rc.s.s, C.int(i)))), C.int(n))
 
-			switch rc.decltype[i] {
-			case columnTimestamp, columnDatetime, columnDate:
+			switch rc.cdecltype[i] {
+			case C.GO_SQLITE3_TYPE_DATETIME:
 				var t time.Time
 				s = strings.TrimSuffix(s, "Z")
 				for _, format := range SQLiteTimestampFormats {
