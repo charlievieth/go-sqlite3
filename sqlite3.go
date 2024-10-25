@@ -191,6 +191,13 @@ error:
 	return rc;
 }
 
+// _sqlite3_column_types get all column types in once C function call
+static void _sqlite3_column_types(sqlite3_stmt *stmt, int column_count, uint8_t *typs) {
+	for (int i = 0; i < column_count; i++) {
+		typs[i] = (uint8_t)sqlite3_column_type(stmt, i);
+	}
+}
+
 int _sqlite3_create_function(
   sqlite3 *db,
   const char *zFunctionName,
@@ -440,6 +447,7 @@ type SQLiteRows struct {
 	nc       int
 	cols     []string
 	decltype []string
+	coltype  []uint8 // sqlite3 column types
 	cls      bool
 	closed   bool
 	ctx      context.Context // no better alternative to pass context into Next() method
@@ -2251,9 +2259,15 @@ func (rc *SQLiteRows) nextSyncLocked(dest []driver.Value) error {
 	}
 
 	rc.declTypes()
+	if rc.coltype == nil {
+		rc.coltype = make([]uint8, len(dest))
+	}
+	// Must call this each time since types can change.
+	C._sqlite3_column_types(rc.s.s, C.int(len(rc.coltype)),
+		(*C.uint8_t)(unsafe.Pointer(&rc.coltype[0])))
 
 	for i := range dest {
-		switch C.sqlite3_column_type(rc.s.s, C.int(i)) {
+		switch rc.coltype[i] {
 		case C.SQLITE_INTEGER:
 			val := int64(C.sqlite3_column_int64(rc.s.s, C.int(i)))
 			switch rc.decltype[i] {
