@@ -67,7 +67,6 @@ _sqlite3_bind_blob(sqlite3_stmt *stmt, int n, void *p, int np) {
   return sqlite3_bind_blob(stmt, n, p, np, SQLITE_TRANSIENT);
 }
 
-#include <stdio.h>
 #include <stdint.h>
 
 static int
@@ -135,6 +134,62 @@ void _sqlite3_result_blob(sqlite3_context* ctx, const void* b, int l) {
   sqlite3_result_blob(ctx, b, l, SQLITE_TRANSIENT);
 }
 
+#define GO_SQLITE_MULTIPLE_QUERIES -1
+
+// Our own implementation of ctype.h's isspace (for simplicity and to avoid
+// whatever locale shenanigans are involved with the Libc's isspace).
+static int _sqlite3_isspace(unsigned char c) {
+	return c == ' ' || c - '\t' < 5;
+}
+
+static int _sqlite3_prepare_query(sqlite3 *db, const char *zSql, int nBytes,
+	sqlite3_stmt **ppStmt, int *paramCount) {
+
+	const char *tail = NULL;
+	int rc = sqlite3_prepare_v2(db, zSql, nBytes, ppStmt, &tail);
+	if (rc != SQLITE_OK) {
+		return rc;
+	}
+	if (paramCount != NULL) {
+		*paramCount = sqlite3_bind_parameter_count(*ppStmt);
+	}
+	if (tail == NULL) {
+		return SQLITE_OK; // NB: this should never happen
+	}
+
+	// Check if sql contains multiple queries.
+
+	// Trim leading space to handle queries with trailing whitespace
+	// since this can save us an additional call to sqlite3_prepare_v2.
+	nBytes -= (tail - zSql);
+	while (nBytes > 0 && _sqlite3_isspace(*tail)) {
+		tail++;
+		nBytes--;
+	}
+
+	// Attempt to parse the remaining SQL, if any.
+	if (nBytes > 0 && *tail) {
+		sqlite3_stmt *stmt = NULL;
+		rc = sqlite3_prepare_v2(db, tail, nBytes, &stmt, NULL);
+		if (rc != SQLITE_OK) {
+			goto error;
+		}
+		if (stmt != NULL) {
+			sqlite3_finalize(stmt);
+			rc = GO_SQLITE_MULTIPLE_QUERIES;
+			goto error;
+		}
+	}
+
+	// Ok, the SQL contained one valid statement.
+	return SQLITE_OK;
+
+error:
+	if (*ppStmt) {
+		sqlite3_finalize(*ppStmt);
+	}
+	return rc;
+}
 
 int _sqlite3_create_function(
   sqlite3 *db,
@@ -915,21 +970,25 @@ func (c *SQLiteConn) Query(query string, args []driver.Value) (driver.Rows, erro
 	return c.query(context.Background(), query, list)
 }
 
-func (c *SQLiteConn) query(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
-	pquery := C.CString(query)
-	op := pquery // original pointer
-	defer C.free(unsafe.Pointer(op))
+var closedRows = &SQLiteRows{s: &SQLiteStmt{closed: true}, closed: true}
 
-	var tail *C.char
-	s := &SQLiteStmt{c: c, cls: true}
-	rv := C._sqlite3_prepare_v2_internal(c.db, pquery, C.int(-1), &s.s, &tail)
+func (c *SQLiteConn) query(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	s := SQLiteStmt{c: c, cls: true}
+	p := stringData(query)
+	var paramCount C.int
+	rv := C._sqlite3_prepare_query(c.db, (*C.char)(unsafe.Pointer(p)), C.int(len(query)), &s.s, &paramCount)
 	if rv != C.SQLITE_OK {
+		if rv == C.GO_SQLITE_MULTIPLE_QUERIES {
+			return nil, errors.New("query contains multiple SQL statements")
+		}
 		return nil, c.lastError()
 	}
 	if s.s == nil {
-		return &SQLiteRows{s: &SQLiteStmt{closed: true}, closed: true}, nil
+		// WARN: make sure this is correct
+		return closedRows, nil // TODO: is this an error?
 	}
-	na := s.NumInput()
+
+	na := int(paramCount)
 	if n := len(args); n != na {
 		s.finalize()
 		if n < na {
@@ -937,26 +996,12 @@ func (c *SQLiteConn) query(ctx context.Context, query string, args []driver.Name
 		}
 		return nil, fmt.Errorf("too many args to execute query: want %d got %d", na, len(args))
 	}
+
 	rows, err := s.query(ctx, args)
 	if err != nil && err != driver.ErrSkip {
 		s.finalize()
 		return rows, err
 	}
-
-	// Consume the rest of the query
-	for pquery = tail; pquery != nil && *pquery != 0; pquery = tail {
-		var stmt *C.sqlite3_stmt
-		rv := C._sqlite3_prepare_v2_internal(c.db, pquery, C.int(-1), &stmt, &tail)
-		if rv != C.SQLITE_OK {
-			rows.Close()
-			return nil, c.lastError()
-		}
-		if stmt != nil {
-			rows.Close()
-			return nil, errors.New("cannot insert multiple commands into a prepared statement") // WARN
-		}
-	}
-
 	return rows, nil
 }
 
@@ -2283,4 +2328,14 @@ func (rc *SQLiteRows) nextSyncLocked(dest []driver.Value) error {
 		}
 	}
 	return nil
+}
+
+// stringData is a safe version of unsafe.StringData that handles empty strings.
+func stringData(s string) *byte {
+	if len(s) != 0 {
+		return unsafe.StringData(s)
+	}
+	// The return value of unsafe.StringData
+	// is unspecified if the string is empty.
+	return &placeHolder[0]
 }
