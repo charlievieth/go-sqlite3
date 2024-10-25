@@ -424,7 +424,6 @@ type SQLiteStmt struct {
 	mu     sync.Mutex
 	c      *SQLiteConn
 	s      *C.sqlite3_stmt
-	t      string
 	closed bool
 	cls    bool
 }
@@ -1863,14 +1862,7 @@ func (c *SQLiteConn) prepare(ctx context.Context, query string) (driver.Stmt, er
 	if rv != C.SQLITE_OK {
 		return nil, c.lastError()
 	}
-	var t string
-	if tail != nil && *tail != 0 {
-		n := int(uintptr(unsafe.Pointer(tail))) - int(uintptr(unsafe.Pointer(pquery)))
-		if 0 <= n && n < len(query) {
-			t = strings.TrimSpace(query[n:])
-		}
-	}
-	ss := &SQLiteStmt{c: c, s: s, t: t}
+	ss := &SQLiteStmt{c: c, s: s, cls: false}
 	runtime.SetFinalizer(ss, (*SQLiteStmt).Close)
 	return ss, nil
 }
