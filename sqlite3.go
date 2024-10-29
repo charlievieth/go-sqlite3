@@ -255,15 +255,32 @@ static int sqlite3_system_errno(sqlite3 *db) {
 #endif
 
 typedef struct {
+	const unsigned char *value;
 	int                 bytes;
-	const unsigned char *text;
 } go_sqlite3_text_column;
 
+// _sqlite3_column_text fetches the text for a column and its size in one CGO call.
 static go_sqlite3_text_column _sqlite3_column_text(sqlite3_stmt *stmt, int idx) {
-	return (go_sqlite3_text_column){
-		.bytes = sqlite3_column_bytes(stmt, idx),
-		.text  = sqlite3_column_text(stmt, idx),
-	};
+	go_sqlite3_text_column r;
+	r.value = sqlite3_column_text(stmt, idx);
+	if (r.value) {
+		r.bytes = sqlite3_column_bytes(stmt, idx);
+	} else {
+		r.bytes = 0;
+	}
+	return r;
+}
+
+// _sqlite3_column_blob fetches the blob for a column and its size in one CGO call.
+static go_sqlite3_text_column _sqlite3_column_blob(sqlite3_stmt *stmt, int idx) {
+	go_sqlite3_text_column r;
+	r.value = sqlite3_column_blob(stmt, idx);
+	if (r.value) {
+		r.bytes = sqlite3_column_bytes(stmt, idx);
+	} else {
+		r.bytes = 0;
+	}
+	return r;
 }
 */
 import "C"
@@ -2267,6 +2284,8 @@ func (rc *SQLiteRows) Next(dest []driver.Value) error {
 	}
 }
 
+var emptyBlob = []byte{}
+
 // nextSyncLocked moves cursor to next; must be called with locked mutex.
 func (rc *SQLiteRows) nextSyncLocked(dest []driver.Value) error {
 	rv := C._sqlite3_step_internal(rc.s.s)
@@ -2317,18 +2336,17 @@ func (rc *SQLiteRows) nextSyncLocked(dest []driver.Value) error {
 		case C.SQLITE_FLOAT:
 			dest[i] = float64(C.sqlite3_column_double(rc.s.s, C.int(i)))
 		case C.SQLITE_BLOB:
-			p := C.sqlite3_column_blob(rc.s.s, C.int(i))
-			if p == nil {
-				dest[i] = []byte{}
-				continue
+			r := C._sqlite3_column_blob(rc.s.s, C.int(i))
+			if r.bytes == 0 {
+				dest[i] = emptyBlob
+			} else {
+				dest[i] = C.GoBytes(unsafe.Pointer(r.value), r.bytes)
 			}
-			n := C.sqlite3_column_bytes(rc.s.s, C.int(i))
-			dest[i] = C.GoBytes(p, n)
 		case C.SQLITE_NULL:
 			dest[i] = nil
 		case C.SQLITE_TEXT:
 			r := C._sqlite3_column_text(rc.s.s, C.int(i))
-			s := C.GoStringN((*C.char)(unsafe.Pointer(r.text)), r.bytes)
+			s := C.GoStringN((*C.char)(unsafe.Pointer(r.value)), r.bytes)
 
 			switch rc.decltype[i] {
 			case columnTimestamp, columnDatetime, columnDate:
