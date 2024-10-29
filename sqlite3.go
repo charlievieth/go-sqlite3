@@ -253,6 +253,18 @@ static int sqlite3_system_errno(sqlite3 *db) {
   return 0;
 }
 #endif
+
+typedef struct {
+	int                 bytes;
+	const unsigned char *text;
+} go_sqlite3_text_column;
+
+static go_sqlite3_text_column _sqlite3_column_text(sqlite3_stmt *stmt, int idx) {
+	return (go_sqlite3_text_column){
+		.bytes = sqlite3_column_bytes(stmt, idx),
+		.text  = sqlite3_column_text(stmt, idx),
+	};
+}
 */
 import "C"
 import (
@@ -2315,17 +2327,16 @@ func (rc *SQLiteRows) nextSyncLocked(dest []driver.Value) error {
 		case C.SQLITE_NULL:
 			dest[i] = nil
 		case C.SQLITE_TEXT:
-			var err error
-			var timeVal time.Time
-
-			n := int(C.sqlite3_column_bytes(rc.s.s, C.int(i)))
-			s := C.GoStringN((*C.char)(unsafe.Pointer(C.sqlite3_column_text(rc.s.s, C.int(i)))), C.int(n))
+			r := C._sqlite3_column_text(rc.s.s, C.int(i))
+			s := C.GoStringN((*C.char)(unsafe.Pointer(r.text)), r.bytes)
 
 			switch rc.decltype[i] {
 			case columnTimestamp, columnDatetime, columnDate:
+				var err error
 				var t time.Time
 				s = strings.TrimSuffix(s, "Z")
 				for _, format := range SQLiteTimestampFormats {
+					var timeVal time.Time
 					if timeVal, err = time.ParseInLocation(format, s, time.UTC); err == nil {
 						t = timeVal
 						break
