@@ -708,6 +708,45 @@ func TestTimestamp(t *testing.T) {
 	}
 }
 
+// TestBooleanSimple is a simple test to make sure that we correctly
+// convert int columns to bools (since sqlite3 does not have a native
+// boolean type).
+func TestBooleanSimple(t *testing.T) {
+	tempFilename := TempFilename(t)
+	defer os.Remove(tempFilename)
+	db, err := sql.Open("sqlite3", tempFilename)
+	if err != nil {
+		t.Fatal("Failed to open database:", err)
+	}
+	defer db.Close()
+
+	_, err = db.Exec("CREATE TABLE bool_test(id INTEGER, fbool BOOLEAN)")
+	if err != nil {
+		t.Fatal("Failed to create table:", err)
+	}
+	for i, val := range []any{true, false, int64(1), int64(0)} {
+		_, err := db.Exec("INSERT INTO bool_test(id, fbool) VALUES(?, ?)", i+1, val)
+		if err != nil {
+			t.Fatal("Failed to insert boolean:", err)
+		}
+	}
+	test := func(t *testing.T, id int64, want bool) {
+		t.Helper()
+		var got bool
+		err := db.QueryRow("SELECT fbool FROM bool_test WHERE id = ?;", id).Scan(&got)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Errorf("Row %d: expected %t got: %t", id, want, got)
+		}
+	}
+	test(t, 1, true)
+	test(t, 2, false)
+	test(t, 3, true)
+	test(t, 4, false)
+}
+
 func TestBoolean(t *testing.T) {
 	tempFilename := TempFilename(t)
 	defer os.Remove(tempFilename)

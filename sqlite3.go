@@ -192,8 +192,8 @@ error:
 }
 
 // _sqlite3_column_types get all column types in once C function call
-static void _sqlite3_column_types(sqlite3_stmt *stmt, int column_count, uint8_t *typs) {
-	for (int i = 0; i < column_count; i++) {
+static void _sqlite3_column_types(sqlite3_stmt *stmt, uint8_t *typs, int ntyps) {
+	for (int i = 0; i < ntyps; i++) {
 		typs[i] = (uint8_t)sqlite3_column_type(stmt, i);
 	}
 }
@@ -281,6 +281,55 @@ static go_sqlite3_text_column _sqlite3_column_blob(sqlite3_stmt *stmt, int idx) 
 		r.bytes = 0;
 	}
 	return r;
+}
+
+#define GO_SQLITE3_DATE_TYPE 1
+#define GO_SQLITE3_BOOL_TYPE 2
+
+static inline unsigned char _sqlite3_tolower(unsigned char c) {
+	return 'A' <= c && c <= 'Z' ? c + 'a' - 'A' : c;
+}
+
+static int _sqlite3_strcasecmp(const char *s1, const char *s2) {
+	#define _lower _sqlite3_tolower
+	const unsigned char *l = (const unsigned char *)s1;
+	const unsigned char *r = (const unsigned char *)s2;
+	for (; *l && *r && (*l == *r || _lower(*l) == _lower(*r)); l++, r++) {
+	}
+	return _lower(*l) == _lower(*r);
+	#undef _lower
+}
+
+static void _sqlite3_column_decltypes(sqlite3_stmt* stmt, uint8_t *decls, int ndecls) {
+	for (int i = 0; i < ndecls; i++) {
+		const char *typ = sqlite3_column_decltype(stmt, i);
+		if (!typ || !*typ) {
+			decls[i] = 0;
+			continue;
+		}
+		switch (typ[0]) {
+		case 'b':
+		case 'B':
+			if (_sqlite3_strcasecmp(typ, "boolean")) {
+				decls[i] = GO_SQLITE3_BOOL_TYPE;
+			}
+			break;
+		case 'd':
+		case 'D':
+			if (_sqlite3_strcasecmp(typ, "date") || _sqlite3_strcasecmp(typ, "datetime")) {
+				decls[i] = GO_SQLITE3_DATE_TYPE;
+			}
+			break;
+		case 't':
+		case 'T':
+			if (_sqlite3_strcasecmp(typ, "timestamp")) {
+				decls[i] = GO_SQLITE3_DATE_TYPE;
+			}
+			break;
+		default:
+			decls[i] = 0;
+		}
+	}
 }
 */
 import "C"
@@ -475,8 +524,9 @@ type SQLiteRows struct {
 	s        *SQLiteStmt
 	nc       int
 	cols     []string
-	decltype []string
-	coltype  []uint8 // sqlite3 column types
+	decltype []string // declared column type (lowercase)
+	dtype    []uint8  // minimal declared column type (either time or bool)
+	coltype  []uint8  // sqlite3 column type
 	cls      bool
 	closed   bool
 	ctx      context.Context // no better alternative to pass context into Next() method
@@ -2286,6 +2336,13 @@ func (rc *SQLiteRows) Next(dest []driver.Value) error {
 
 var emptyBlob = []byte{}
 
+func uint8ptr(b []uint8) *C.uint8_t {
+	if len(b) == 0 {
+		return nil
+	}
+	return (*C.uint8_t)(unsafe.Pointer(&b[0]))
+}
+
 // nextSyncLocked moves cursor to next; must be called with locked mutex.
 func (rc *SQLiteRows) nextSyncLocked(dest []driver.Value) error {
 	rv := C._sqlite3_step_internal(rc.s.s)
@@ -2300,20 +2357,25 @@ func (rc *SQLiteRows) nextSyncLocked(dest []driver.Value) error {
 		return nil
 	}
 
-	rc.declTypes()
+	// TODO: combine decl and column types by only using the highest bits
+	// for the decl tyes (since we only have two values).
+	if rc.dtype == nil {
+		rc.dtype = make([]uint8, len(dest))
+		C._sqlite3_column_decltypes(rc.s.s, uint8ptr(rc.dtype),
+			C.int(len(rc.dtype)))
+	}
 	if rc.coltype == nil {
 		rc.coltype = make([]uint8, len(dest))
 	}
 	// Must call this each time since types can change.
-	C._sqlite3_column_types(rc.s.s, C.int(len(rc.coltype)),
-		(*C.uint8_t)(unsafe.Pointer(&rc.coltype[0])))
+	C._sqlite3_column_types(rc.s.s, uint8ptr(rc.coltype), C.int(len(rc.coltype)))
 
 	for i := range dest {
 		switch rc.coltype[i] {
 		case C.SQLITE_INTEGER:
 			val := int64(C.sqlite3_column_int64(rc.s.s, C.int(i)))
-			switch rc.decltype[i] {
-			case columnTimestamp, columnDatetime, columnDate:
+			switch rc.dtype[i] {
+			case C.GO_SQLITE3_DATE_TYPE:
 				var t time.Time
 				// Assume a millisecond unix timestamp if it's 13 digits -- too
 				// large to be a reasonable timestamp in seconds.
@@ -2328,7 +2390,7 @@ func (rc *SQLiteRows) nextSyncLocked(dest []driver.Value) error {
 					t = t.In(rc.s.c.loc)
 				}
 				dest[i] = t
-			case "boolean":
+			case C.GO_SQLITE3_BOOL_TYPE:
 				dest[i] = val > 0
 			default:
 				dest[i] = val
@@ -2348,8 +2410,7 @@ func (rc *SQLiteRows) nextSyncLocked(dest []driver.Value) error {
 			r := C._sqlite3_column_text(rc.s.s, C.int(i))
 			s := C.GoStringN((*C.char)(unsafe.Pointer(r.value)), r.bytes)
 
-			switch rc.decltype[i] {
-			case columnTimestamp, columnDatetime, columnDate:
+			if rc.dtype[i] == C.GO_SQLITE3_DATE_TYPE {
 				var err error
 				var t time.Time
 				s = strings.TrimSuffix(s, "Z")
@@ -2368,7 +2429,7 @@ func (rc *SQLiteRows) nextSyncLocked(dest []driver.Value) error {
 					t = t.In(rc.s.c.loc)
 				}
 				dest[i] = t
-			default:
+			} else {
 				dest[i] = s
 			}
 		}
