@@ -1942,11 +1942,10 @@ func (c *SQLiteConn) Prepare(query string) (driver.Stmt, error) {
 }
 
 func (c *SQLiteConn) prepare(ctx context.Context, query string) (driver.Stmt, error) {
-	pquery := C.CString(query)
-	defer C.free(unsafe.Pointer(pquery))
+	p := stringData(query)
 	var s *C.sqlite3_stmt
 	var tail *C.char
-	rv := C._sqlite3_prepare_v2_internal(c.db, pquery, C.int(-1), &s, &tail)
+	rv := C._sqlite3_prepare_v2_internal(c.db, (*C.char)(unsafe.Pointer(p)), C.int(len(query)), &s, &tail)
 	if rv != C.SQLITE_OK {
 		return nil, c.lastError()
 	}
