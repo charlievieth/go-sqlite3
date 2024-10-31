@@ -11,10 +11,13 @@ package sqlite3
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"math/rand"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -181,7 +184,124 @@ FROM test_table t1 LEFT OUTER JOIN test_table t2`
 	}
 }
 
+func TestQueryRowContextCancel_Real(t *testing.T) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	const createTableStmt = `
+	CREATE TABLE timestamps (
+		ts TIMESTAMP NOT NULL
+	);`
+	if _, err := db.Exec(createTableStmt); err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+
+	stmt, err := db.Prepare(`INSERT INTO timestamps VALUES (?);`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stmt.Close()
+
+	const N = 100_000
+	ts := time.Date(2024, 6, 6, 8, 9, 10, 12345, time.UTC).Unix()
+	rr := rand.New(rand.NewSource(1234))
+	for i := 0; i < N; i++ {
+		if _, err := stmt.Exec(ts + rr.Int63n(10_000) - 5_000); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Log("Table setup time:", time.Since(start))
+
+	// Computationally expensive query that takes about ~200ms to run on a
+	// M1 Max chip with 100k rows.
+	//
+	// We need an expensive query that consumes many rows because queries are
+	// not interrupted immediately. Instead, queries are only halted when a
+	// checkpoint checks that the sqlite3.isInterrupted field is true.
+	//
+	// For this reason using something like a custom "sleep" function will not
+	// work for testing query abortion because sqlite3 has no way of interrupting
+	// the call to sleep (or really any other function).
+	queryStmt := `
+	SELECT
+		datetime(ts, 'unixepoch', 'localtime')
+	FROM
+		timestamps
+	WHERE datetime(ts, 'unixepoch', 'localtime')
+	LIKE
+		?;`
+
+	// Create a complicated LIKE pattern:
+	//   "2024-10-17 12:10:20" => "%2%0%2%4%-%-%:%:%"
+	year := "%" + strings.Join(strings.Split(strconv.Itoa(time.Now().Year()), ""), "%") + "%-%-%:%:%"
+
+	query := func(t *testing.T, timeout time.Duration) (int, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		rows, err := db.QueryContext(ctx, queryStmt, year)
+		if err != nil {
+			return 0, err
+		}
+		var s string
+		var n int
+		for rows.Next() {
+			if err := rows.Scan(&s); err != nil {
+				return 0, err
+			}
+			n++
+		}
+		return n, rows.Err()
+	}
+
+	var total time.Duration
+	for i := 0; i < 5; i++ {
+		tt := time.Now()
+		n, err := query(t, time.Hour)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n != N {
+			t.Fatalf("expected all rows to be read got: %d want: %d", n, N)
+		}
+		total += time.Since(tt)
+	}
+	avg := (total / 5).Round(time.Millisecond / 10)
+	timeout := (avg / 10).Round(time.Millisecond / 10)
+	t.Logf("Average: %s Timeout: %s", avg, timeout)
+
+	// Guard against the timeout being too short to reliably test.
+	if timeout < 4*time.Millisecond {
+		t.Fatal("Timeout too short:", timeout)
+	}
+
+	for i := 0; i < 10; i++ {
+		tt := time.Now()
+		n, err := query(t, timeout)
+		if !errors.Is(err, context.DeadlineExceeded) {
+			fn := t.Errorf
+			if err != nil {
+				fn = t.Fatalf
+			}
+			fn("expected error %v got %v", context.DeadlineExceeded, err)
+		}
+		d := time.Since(tt)
+		t.Logf("%d: rows: %d duration: %s", i, n, d)
+		if d > timeout*4 {
+			t.Errorf("query was cancelled after %s but did not abort until: %s", timeout, d)
+		}
+	}
+}
+
 func TestQueryRowContextCancel(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("short test")
+	}
 	srcTempFilename := TempFilename(t)
 	defer os.Remove(srcTempFilename)
 
@@ -216,6 +336,10 @@ func TestQueryRowContextCancel(t *testing.T) {
 }
 
 func TestQueryRowContextCancelParallel(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("short test")
+	}
 	srcTempFilename := TempFilename(t)
 	defer os.Remove(srcTempFilename)
 

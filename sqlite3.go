@@ -349,6 +349,8 @@ import (
 	"syscall"
 	"time"
 	"unsafe"
+
+	"github.com/mattn/go-sqlite3/internal/timefmt"
 )
 
 // SQLiteTimestampFormats is timestamp formats understood by both this module
@@ -510,7 +512,7 @@ type SQLiteStmt struct {
 	c      *SQLiteConn
 	s      *C.sqlite3_stmt
 	closed bool
-	cls    bool
+	cls    bool // TODO: document this field and why it's set
 }
 
 // SQLiteResult implements sql.Result.
@@ -522,7 +524,7 @@ type SQLiteResult struct {
 // SQLiteRows implements driver.Rows.
 type SQLiteRows struct {
 	s        *SQLiteStmt
-	nc       int
+	nc       int // TODO: use a smaller type the max number of columns is 32,767
 	cols     []string
 	decltype []string // declared column type (lowercase)
 	dtype    []uint8  // minimal declared column type (either time or bool)
@@ -606,6 +608,7 @@ func (ai *aggInfo) Step(ctx *C.sqlite3_context, argv []*C.sqlite3_value) {
 		return
 	}
 
+	// TODO: remove this https://github.com/mattn/go-sqlite3/issues/1010
 	ret := agg.MethodByName("Step").Call(args)
 	if len(ret) == 1 && ret[0].Interface() != nil {
 		callbackError(ctx, ret[0].Interface().(error))
@@ -621,6 +624,7 @@ func (ai *aggInfo) Done(ctx *C.sqlite3_context) {
 	}
 	defer func() { delete(ai.active, idx) }()
 
+	// TODO: remove this https://github.com/mattn/go-sqlite3/issues/1010
 	ret := agg.MethodByName("Done").Call(nil)
 	if len(ret) == 2 && ret[1].Interface() != nil {
 		callbackError(ctx, ret[1].Interface().(error))
@@ -817,6 +821,11 @@ func sqlite3CreateFunction(db *C.sqlite3, zFunctionName *C.char, nArg C.int, eTe
 	return C._sqlite3_create_function(db, zFunctionName, nArg, eTextRep, C.uintptr_t(uintptr(pApp)), (*[0]byte)(xFunc), (*[0]byte)(xStep), (*[0]byte)(xFinal))
 }
 
+// TODO: remove this it breaks dead code elimination and is not widely used the
+// below GitHub search returns 71 matches (though the real number is likely lower):
+//
+//	`.RegisterAggregator( language:go AND NOT path:_example AND NOT is:fork AND NOT is:vendored`
+//
 // RegisterAggregator makes a Go type available as a SQLite aggregation function.
 //
 // Because aggregation is incremental, it's implemented in Go with a
@@ -857,6 +866,7 @@ func (c *SQLiteConn) RegisterAggregator(name string, impl interface{}, pure bool
 	default:
 		return errors.New("SQlite aggregator constructor must return a pointer object")
 	}
+	// TODO: remove this https://github.com/mattn/go-sqlite3/issues/1010
 	stepFn, found := agg.MethodByName("Step")
 	if !found {
 		return errors.New("SQlite aggregator doesn't have a Step() function")
@@ -898,6 +908,7 @@ func (c *SQLiteConn) RegisterAggregator(name string, impl interface{}, pure bool
 		stepNArgs = -1
 	}
 
+	// TODO: remove this https://github.com/mattn/go-sqlite3/issues/1010
 	doneFn, found := agg.MethodByName("Done")
 	if !found {
 		return errors.New("SQlite aggregator doesn't have a Done() function")
@@ -1915,6 +1926,7 @@ func (d *SQLiteDriver) Open(dsn string) (driver.Conn, error) {
 
 // Close the connection.
 func (c *SQLiteConn) Close() error {
+	// TODO: test double close
 	rv := C.sqlite3_close_v2(c.db)
 	if rv != C.SQLITE_OK {
 		return c.lastError()
@@ -1923,7 +1935,7 @@ func (c *SQLiteConn) Close() error {
 	c.mu.Lock()
 	c.db = nil
 	c.mu.Unlock()
-	runtime.SetFinalizer(c, nil)
+	runtime.SetFinalizer(c, nil) // WARN: not ran if error
 	return nil
 }
 
@@ -1949,6 +1961,7 @@ func (c *SQLiteConn) prepare(ctx context.Context, query string) (driver.Stmt, er
 	if rv != C.SQLITE_OK {
 		return nil, c.lastError()
 	}
+	// TODO: return an error if the SQL has more than one statement
 	ss := &SQLiteStmt{c: c, s: s, cls: false}
 	runtime.SetFinalizer(ss, (*SQLiteStmt).Close)
 	return ss, nil
@@ -2028,6 +2041,8 @@ func (s *SQLiteStmt) Close() error {
 		return nil
 	}
 	s.closed = true
+	// NB: safe to remove finalizer here
+	runtime.SetFinalizer(s, nil) // WARN: changed this to be here
 	if !s.c.dbConnOpen() {
 		return errors.New("sqlite statement with already closed database connection")
 	}
@@ -2036,7 +2051,6 @@ func (s *SQLiteStmt) Close() error {
 	if rv != C.SQLITE_OK {
 		return s.c.lastError()
 	}
-	runtime.SetFinalizer(s, nil)
 	return nil
 }
 
@@ -2049,31 +2063,99 @@ func (s *SQLiteStmt) finalize() {
 
 // NumInput return a number of parameters.
 func (s *SQLiteStmt) NumInput() int {
+	// TODO: cache the result of this
 	return int(C.sqlite3_bind_parameter_count(s.s))
 }
 
 var placeHolder = []byte{0}
 
+func hasNamedArgs(args []driver.NamedValue) bool {
+	for _, v := range args {
+		if v.Name != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// TODO: return the column count as well
 func (s *SQLiteStmt) bind(args []driver.NamedValue) error {
 	rv := C.sqlite3_reset(s.s)
 	if rv != C.SQLITE_ROW && rv != C.SQLITE_OK && rv != C.SQLITE_DONE {
 		return s.c.lastError()
 	}
 
+	if hasNamedArgs(args) {
+		return s.bindIndices(args)
+	}
+
+	for _, arg := range args {
+		n := C.int(arg.Ordinal)
+		switch v := arg.Value.(type) {
+		case nil:
+			rv = C.sqlite3_bind_null(s.s, n)
+		case string:
+			p := stringData(v)
+			rv = C._sqlite3_bind_text(s.s, n, (*C.char)(unsafe.Pointer(p)), C.int(len(v)))
+		case int64:
+			rv = C.sqlite3_bind_int64(s.s, n, C.sqlite3_int64(v))
+		case bool:
+			val := 0
+			if v {
+				val = 1
+			}
+			rv = C.sqlite3_bind_int(s.s, n, C.int(val))
+		case float64:
+			rv = C.sqlite3_bind_double(s.s, n, C.double(v))
+		case []byte:
+			if v == nil {
+				rv = C.sqlite3_bind_null(s.s, n)
+			} else {
+				ln := len(v)
+				if ln == 0 {
+					v = placeHolder
+				}
+				rv = C._sqlite3_bind_blob(s.s, n, unsafe.Pointer(&v[0]), C.int(ln))
+			}
+		case time.Time:
+			// TODO: use a reusable buffer
+			b := timefmt.Format(v)
+			rv = C._sqlite3_bind_text(s.s, n, (*C.char)(unsafe.Pointer(&b[0])), C.int(len(b)))
+		}
+		if rv != C.SQLITE_OK {
+			return s.c.lastError()
+		}
+	}
+	return nil
+}
+
+func (s *SQLiteStmt) bindIndices(args []driver.NamedValue) error {
+	// Find the longest named parameter name.
+	n := 0
+	for _, v := range args {
+		if m := len(v.Name); m > n {
+			n = m
+		}
+	}
+	buf := make([]byte, 0, n+2) // +2 for placeholder and null terminator
+
+	// TODO: Reduce the size of this slive by using uint32 or uint16.
+	// By default SQLITE_MAX_FUNCTION_ARG is 100 so uint16 should work.
 	bindIndices := make([][3]int, len(args))
-	prefixes := []string{":", "@", "$"}
 	for i, v := range args {
 		bindIndices[i][0] = args[i].Ordinal
 		if v.Name != "" {
-			for j := range prefixes {
-				cname := C.CString(prefixes[j] + v.Name)
-				bindIndices[i][j] = int(C.sqlite3_bind_parameter_index(s.s, cname))
-				C.free(unsafe.Pointer(cname))
+			for j, c := range []byte{':', '@', '$'} {
+				buf = append(buf[:0], c)
+				buf = append(buf, v.Name...)
+				buf = append(buf, 0)
+				bindIndices[i][j] = int(C.sqlite3_bind_parameter_index(s.s, (*C.char)(unsafe.Pointer(&buf[0]))))
 			}
 			args[i].Ordinal = bindIndices[i][0]
 		}
 	}
 
+	var rv C.int
 	for i, arg := range args {
 		for j := range bindIndices[i] {
 			if bindIndices[i][j] == 0 {
@@ -2084,20 +2166,16 @@ func (s *SQLiteStmt) bind(args []driver.NamedValue) error {
 			case nil:
 				rv = C.sqlite3_bind_null(s.s, n)
 			case string:
-				if len(v) == 0 {
-					rv = C._sqlite3_bind_text(s.s, n, (*C.char)(unsafe.Pointer(&placeHolder[0])), C.int(0))
-				} else {
-					b := []byte(v)
-					rv = C._sqlite3_bind_text(s.s, n, (*C.char)(unsafe.Pointer(&b[0])), C.int(len(b)))
-				}
+				p := stringData(v)
+				rv = C._sqlite3_bind_text(s.s, n, (*C.char)(unsafe.Pointer(p)), C.int(len(v)))
 			case int64:
 				rv = C.sqlite3_bind_int64(s.s, n, C.sqlite3_int64(v))
 			case bool:
+				val := 0
 				if v {
-					rv = C.sqlite3_bind_int(s.s, n, 1)
-				} else {
-					rv = C.sqlite3_bind_int(s.s, n, 0)
+					val = 1
 				}
+				rv = C.sqlite3_bind_int(s.s, n, C.int(val))
 			case float64:
 				rv = C.sqlite3_bind_double(s.s, n, C.double(v))
 			case []byte:
@@ -2111,7 +2189,7 @@ func (s *SQLiteStmt) bind(args []driver.NamedValue) error {
 					rv = C._sqlite3_bind_blob(s.s, n, unsafe.Pointer(&v[0]), C.int(ln))
 				}
 			case time.Time:
-				b := []byte(v.Format(SQLiteTimestampFormats[0]))
+				b := timefmt.Format(v)
 				rv = C._sqlite3_bind_text(s.s, n, (*C.char)(unsafe.Pointer(&b[0])), C.int(len(b)))
 			}
 			if rv != C.SQLITE_OK {
@@ -2238,6 +2316,7 @@ func (s *SQLiteStmt) execSync(args []driver.NamedValue) (driver.Result, error) {
 //
 // See: https://sqlite.org/c3ref/stmt_readonly.html
 func (s *SQLiteStmt) Readonly() bool {
+	// TODO: cache the result of this
 	return C.sqlite3_stmt_readonly(s.s) == 1
 }
 
@@ -2264,6 +2343,10 @@ func (rc *SQLiteRows) Close() error {
 
 // Columns return column names.
 func (rc *SQLiteRows) Columns() []string {
+	// CEV: this is called once by sql.Rows.Next() to get the number
+	// of columns in the result (which is annoying).
+	//
+	// TODO: maybe we can intern some of these strings
 	rc.s.mu.Lock()
 	defer rc.s.mu.Unlock()
 	if rc.s.s != nil && rc.nc != len(rc.cols) {
@@ -2275,11 +2358,38 @@ func (rc *SQLiteRows) Columns() []string {
 	return rc.cols
 }
 
+func declTypeStr(typ string) string {
+	switch typ {
+	case "BLOB", "blob":
+		return "blob"
+	case "BOOL", "bool":
+		return "boolean"
+	case "BOOLEAN", "boolean":
+		return "boolean"
+	case "DATETIME", "datetime":
+		return "datetime"
+	case "INT", "int":
+		return "int"
+	case "INTEGER", "integer":
+		return "integer"
+	case "TEXT", "text":
+		return "text"
+	case "TIMESTAMP", "timestamp":
+		return "timestamp"
+	default:
+		return strings.ToLower(typ)
+	}
+}
+
 func (rc *SQLiteRows) declTypes() []string {
 	if rc.s.s != nil && rc.decltype == nil {
+		if rc.nc == 0 {
+			return nil
+		}
 		rc.decltype = make([]string, rc.nc)
 		for i := 0; i < rc.nc; i++ {
-			rc.decltype[i] = strings.ToLower(C.GoString(C.sqlite3_column_decltype(rc.s.s, C.int(i))))
+			typ := C.GoString(C.sqlite3_column_decltype(rc.s.s, C.int(i)))
+			rc.decltype[i] = declTypeStr(typ)
 		}
 	}
 	return rc.decltype
@@ -2407,8 +2517,11 @@ func (rc *SQLiteRows) nextSyncLocked(dest []driver.Value) error {
 			dest[i] = nil
 		case C.SQLITE_TEXT:
 			r := C._sqlite3_column_text(rc.s.s, C.int(i))
+			// TODO: for dates we can just parse the raw *char without
+			// converting it to a Go string.
 			s := C.GoStringN((*C.char)(unsafe.Pointer(r.value)), r.bytes)
 
+			// WARN: we should return an error here if the date cannot be parsed !!!
 			if rc.dtype[i] == C.GO_SQLITE3_DATE_TYPE {
 				var err error
 				var t time.Time
@@ -2445,3 +2558,228 @@ func stringData(s string) *byte {
 	// is unspecified if the string is empty.
 	return &placeHolder[0]
 }
+
+// // func (rc *SQLiteRows) isDateTime(idx int) bool {
+// // 	if rc.s.s == nil {
+// // 		return false
+// // 	}
+// // 	if rc.cts == nil {
+// // 		rc.cts = make([]uint8, rc.nc)
+// // 	}
+// // 	if rc.cts[idx] == 0 {
+// // 		rv := C._sqlite3_column_decltype_internal(rc.s.s, C.int(idx))
+// // 		if rv == 0 {
+// // 			rc.cts[idx] = 1
+// // 		} else {
+// // 			rc.cts[idx] = 2
+// // 		}
+// // 	}
+// // 	return rc.cts[idx] == 2
+// // }
+//
+// // TODO: rename to strcasecmp or something since we don't actually fold
+// func equalFold(s []byte, t string) bool {
+// 	if len(s) != len(t) {
+// 		return false
+// 	}
+// 	if string(s) == t {
+// 		return true
+// 	}
+// 	for i := 0; i < len(s) && i < len(t); i++ {
+// 		sr := s[i]
+// 		tr := t[i]
+// 		// Easy case.
+// 		if tr == sr {
+// 			continue
+// 		}
+// 		// Make sr < tr to simplify what follows.
+// 		if tr < sr {
+// 			tr, sr = sr, tr
+// 		}
+// 		if 'A' <= sr && sr <= 'Z' && tr == sr+'a'-'A' {
+// 			continue
+// 		}
+// 		return false
+// 	}
+// 	return true
+// }
+//
+// // WARN: the name here almost collides with the field
+// //
+// // TODO TODO TODO TODO TODO TODO TODO
+// // TODO: test this use C.CString()
+// // TODO TODO TODO TODO TODO TODO TODO
+// func (rc *SQLiteRows) declType(idx int) string {
+// 	// if rc.s.s == nil {
+// 	// 	return ""
+// 	// }
+// 	// if rc.decltype == nil {
+// 	// 	rc.decltype = make([]string, rc.nc)
+// 	// }
+//
+// 	// WARN: disabling for testing
+// 	// TODO: we don't need this
+// 	// if s := rc.decltype[idx]; s != "" {
+// 	// 	return s
+// 	// }
+//
+// 	p := (*[1 << 29]byte)(unsafe.Pointer(C.sqlite3_column_decltype(rc.s.s, C.int(idx))))
+// 	if p == nil {
+// 		return ""
+// 	}
+// 	var n int
+// 	for i, c := range p {
+// 		if c == 0 {
+// 			n = i
+// 			break
+// 		}
+// 	}
+// 	b := unsafe.Slice(&p[0], n)
+// 	switch b[0] {
+// 	case 'b', 'B':
+// 		if equalFold(b, "BLOB") {
+// 			return "blob"
+// 		}
+// 		if equalFold(b, "BOOLEAN") {
+// 			return "boolean"
+// 		}
+// 	case 'd', 'D':
+// 		if equalFold(b, "DATE") {
+// 			return "date"
+// 		}
+// 		if equalFold(b, "DATETIME") {
+// 			return "datetime"
+// 		}
+// 	case 'i', 'I':
+// 		if equalFold(b, "INTEGER") {
+// 			return "integer"
+// 		}
+// 	case 'r', 'R':
+// 		if equalFold(b, "REAL") {
+// 			return "real"
+// 		}
+// 	case 't', 'T':
+// 		if equalFold(b, "TIMESTAMP") {
+// 			return "timestamp"
+// 		}
+// 	}
+// 	// s := string(b)
+// 	// if v, ok := internedDeclTypes.Load(s); ok {
+// 	// 	return v.(string)
+// 	// }
+// 	// if numInternedDeclTypes.Load() < 128 {
+// 	// 	if numInternedDeclTypes.Add(1) <= 128 {
+// 	// 		v, loaded := internedDeclTypes.LoadOrStore(s, strings.ToLower(s))
+// 	// 		if loaded {
+// 	// 			s = v.(string)
+// 	// 		}
+// 	// 		return s
+// 	// 	}
+// 	// }
+// 	return strings.ToLower(string(b))
+// }
+//
+// var (
+// 	internedDeclTypes    sync.Map
+// 	numInternedDeclTypes atomic.Int32
+// )
+// var internedDeclTypesX struct {
+// 	sync.RWMutex
+// 	typs map[string]string
+// }
+//
+// func parseDeclType(cstr *C.char) string {
+// 	// if rc.s.s == nil {
+// 	// 	return ""
+// 	// }
+// 	// if rc.decltype == nil {
+// 	// 	rc.decltype = make([]string, rc.nc)
+// 	// }
+//
+// 	// WARN: disabling for testing
+// 	// TODO: we don't need this
+// 	// if s := rc.decltype[idx]; s != "" {
+// 	// 	return s
+// 	// }
+//
+// 	p := (*[1 << 29]byte)(unsafe.Pointer(cstr))
+// 	if p == nil {
+// 		return ""
+// 	}
+// 	var n int
+// 	for i, c := range p {
+// 		if c == 0 {
+// 			n = i
+// 			break
+// 		}
+// 	}
+// 	b := unsafe.Slice(&p[0], n)
+// 	switch b[0] {
+// 	case 'b', 'B':
+// 		if equalFold(b, "BLOB") {
+// 			return "blob"
+// 		}
+// 		if equalFold(b, "BOOLEAN") {
+// 			return "boolean"
+// 		}
+// 	case 'd', 'D':
+// 		if equalFold(b, "DATE") {
+// 			return "date"
+// 		}
+// 		if equalFold(b, "DATETIME") {
+// 			return "datetime"
+// 		}
+// 	case 'i', 'I':
+// 		if equalFold(b, "INTEGER") {
+// 			return "integer"
+// 		}
+// 	case 'r', 'R':
+// 		if equalFold(b, "REAL") {
+// 			return "real"
+// 		}
+// 	case 't', 'T':
+// 		if equalFold(b, "TIMESTAMP") {
+// 			return "timestamp"
+// 		}
+// 	}
+//
+// 	m := &internedDeclTypesX
+// 	m.RLock()
+// 	v := m.typs[string(b)]
+// 	sz := len(m.typs)
+// 	m.RUnlock()
+// 	if v != "" {
+// 		return v
+// 	}
+// 	if sz < 128 {
+// 		m.Lock()
+// 		if m.typs == nil {
+// 			m.typs = make(map[string]string, 128)
+// 		}
+// 		if len(m.typs) < 128 {
+// 			s := string(b)
+// 			l := strings.ToLower(s)
+// 			m.typs[s] = l
+// 			m.Unlock()
+// 			return l
+// 		}
+// 		m.Unlock()
+// 	}
+// 	return strings.ToLower(string(b))
+//
+// 	// s := string(b)
+// 	// if v, ok := internedDeclTypes.Load(s); ok {
+// 	// 	return v.(string)
+// 	// }
+// 	// if numInternedDeclTypes.Load() < 128 {
+// 	// 	if numInternedDeclTypes.Add(1) <= 128 {
+// 	// 		v, loaded := internedDeclTypes.LoadOrStore(s, strings.ToLower(s))
+// 	// 		if loaded {
+// 	// 			s = v.(string)
+// 	// 		}
+// 	// 		return s
+// 	// 	}
+// 	// }
+// 	// return strings.ToLower(string(b))
+// 	// return strings.ToLower(string((*p)[:n]))
+// }
