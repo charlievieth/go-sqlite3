@@ -399,6 +399,7 @@ type SQLiteRows struct {
 	cls      bool
 	closed   bool
 	ctx      context.Context // no better alternative to pass context into Next() method
+	resultCh chan error
 }
 
 type functionInfo struct {
@@ -2172,24 +2173,29 @@ func (rc *SQLiteRows) Next(dest []driver.Value) error {
 		return io.EOF
 	}
 
-	if rc.ctx.Done() == nil {
+	done := rc.ctx.Done()
+	if done == nil {
 		return rc.nextSyncLocked(dest)
 	}
-	resultCh := make(chan error)
-	defer close(resultCh)
+	if err := rc.ctx.Err(); err != nil {
+		return err // Fast check if the channel is closed
+	}
+	if rc.resultCh == nil {
+		rc.resultCh = make(chan error)
+	}
 	go func() {
-		resultCh <- rc.nextSyncLocked(dest)
+		rc.resultCh <- rc.nextSyncLocked(dest)
 	}()
 	select {
-	case err := <-resultCh:
+	case err := <-rc.resultCh:
 		return err
-	case <-rc.ctx.Done():
+	case <-done:
 		select {
-		case <-resultCh: // no need to interrupt
+		case <-rc.resultCh: // no need to interrupt
 		default:
 			// this is still racy and can be no-op if executed between sqlite3_* calls in nextSyncLocked.
 			C.sqlite3_interrupt(rc.s.c.db)
-			<-resultCh // ensure goroutine completed
+			<-rc.resultCh // ensure goroutine completed
 		}
 		return rc.ctx.Err()
 	}
