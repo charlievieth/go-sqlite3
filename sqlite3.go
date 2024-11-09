@@ -295,6 +295,35 @@ static void _sqlite3_column_types(sqlite3_stmt *stmt, uint8_t *typs, int ntyps) 
 		typs[i] |= (uint8_t)sqlite3_column_type(stmt, i);
 	}
 }
+
+typedef struct {
+	const unsigned char *value;
+	int                 bytes;
+} go_sqlite3_text_column;
+
+// _sqlite3_column_text fetches the text for a column and its size in one CGO call.
+static go_sqlite3_text_column _sqlite3_column_text(sqlite3_stmt *stmt, int idx) {
+	go_sqlite3_text_column r;
+	r.value = sqlite3_column_text(stmt, idx);
+	if (r.value) {
+		r.bytes = sqlite3_column_bytes(stmt, idx);
+	} else {
+		r.bytes = 0;
+	}
+	return r;
+}
+
+// _sqlite3_column_blob fetches the blob for a column and its size in one CGO call.
+static go_sqlite3_text_column _sqlite3_column_blob(sqlite3_stmt *stmt, int idx) {
+	go_sqlite3_text_column r;
+	r.value = sqlite3_column_blob(stmt, idx);
+	if (r.value) {
+		r.bytes = sqlite3_column_bytes(stmt, idx);
+	} else {
+		r.bytes = 0;
+	}
+	return r;
+}
 */
 import "C"
 import (
@@ -2386,6 +2415,8 @@ func (rc *SQLiteRows) colTypePtr() *C.uint8_t {
 	return (*C.uint8_t)(unsafe.Pointer(&rc.coltype[0]))
 }
 
+var emptyBlob = []byte{}
+
 // nextSyncLocked moves cursor to next; must be called with locked mutex.
 func (rc *SQLiteRows) nextSyncLocked(dest []driver.Value) error {
 	rv := C._sqlite3_step_internal(rc.s.s)
@@ -2439,28 +2470,26 @@ func (rc *SQLiteRows) nextSyncLocked(dest []driver.Value) error {
 		case C.SQLITE_FLOAT:
 			dest[i] = float64(C.sqlite3_column_double(rc.s.s, C.int(i)))
 		case C.SQLITE_BLOB:
-			p := C.sqlite3_column_blob(rc.s.s, C.int(i))
-			if p == nil {
-				dest[i] = []byte{}
-				continue
+			r := C._sqlite3_column_blob(rc.s.s, C.int(i))
+			if r.bytes == 0 {
+				dest[i] = emptyBlob
+			} else {
+				dest[i] = C.GoBytes(unsafe.Pointer(r.value), r.bytes)
 			}
-			n := C.sqlite3_column_bytes(rc.s.s, C.int(i))
-			dest[i] = C.GoBytes(p, n)
 		case C.SQLITE_NULL:
 			dest[i] = nil
 		case C.SQLITE_TEXT:
-			var err error
-			var timeVal time.Time
-
-			n := int(C.sqlite3_column_bytes(rc.s.s, C.int(i)))
-			s := C.GoStringN((*C.char)(unsafe.Pointer(C.sqlite3_column_text(rc.s.s, C.int(i)))), C.int(n))
+			r := C._sqlite3_column_text(rc.s.s, C.int(i))
+			// TODO: for dates we can just parse the raw *char without
+			// converting it to a Go string.
+			s := C.GoStringN((*C.char)(unsafe.Pointer(r.value)), r.bytes)
 
 			if rc.coltype[i].DeclType() == C.GO_SQLITE3_DECL_DATE {
+				var err error
 				var t time.Time
 				s = strings.TrimSuffix(s, "Z")
 				for _, format := range SQLiteTimestampFormats {
-					if timeVal, err = time.ParseInLocation(format, s, time.UTC); err == nil {
-						t = timeVal
+					if t, err = time.ParseInLocation(format, s, time.UTC); err == nil {
 						break
 					}
 				}
