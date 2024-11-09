@@ -10,9 +10,11 @@ package sqlite3
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"database/sql/driver"
 	"errors"
+	"flag"
 	"fmt"
 	"io/ioutil"
 	"math/rand"
@@ -907,6 +909,31 @@ func TestNull(t *testing.T) {
 	}
 }
 
+// Test that we match the existing behavior of not returning an error when an
+// empty SQL statement is passed to Exec.
+//
+// https://github.com/mattn/go-sqlite3/issues/963
+//
+// NB: I'm not sure that returing a nil error when the SQL statement is empty
+// is the correct behavior, but changing it may break existing programs.
+func TestEmptyExec(t *testing.T) {
+	tempFilename := TempFilename(t)
+	defer os.Remove(tempFilename)
+	db, err := sql.Open("sqlite3", tempFilename)
+	if err != nil {
+		t.Fatal("Failed to open database:", err)
+	}
+	defer db.Close()
+
+	res, err := db.Exec("")
+	if err != nil {
+		t.Fatal("Exec with an empty query should not return an error got:", err)
+	}
+	if res == nil {
+		t.Fatal("Exec with an empty query returned a nil result:", res)
+	}
+}
+
 func TestTransaction(t *testing.T) {
 	tempFilename := TempFilename(t)
 	defer os.Remove(tempFilename)
@@ -1109,7 +1136,7 @@ func TestTimezoneConversion(t *testing.T) {
 }
 
 // TODO: Execer & Queryer currently disabled
-// https://github.com/mattn/go-sqlite3/issues/82
+// https://github.com/charlievieth/go-sqlite3/issues/82
 func TestExecer(t *testing.T) {
 	tempFilename := TempFilename(t)
 	defer os.Remove(tempFilename)
@@ -1128,6 +1155,67 @@ func TestExecer(t *testing.T) {
 	if err != nil {
 		t.Error("Failed to call db.Exec:", err)
 	}
+}
+
+func TestExecDriverResult(t *testing.T) {
+	setup := func(t *testing.T) *sql.DB {
+		db, err := sql.Open("sqlite3", t.TempDir()+"/test.sqlite3")
+		if err != nil {
+			t.Fatal("Failed to open database:", err)
+		}
+		if _, err := db.Exec(`CREATE TABLE foo (id INTEGER PRIMARY KEY);`); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { db.Close() })
+		return db
+	}
+
+	test := func(t *testing.T, execStmt string, args ...any) {
+		db := setup(t)
+		res, err := db.Exec(execStmt, args...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rows, err := res.RowsAffected()
+		if err != nil {
+			t.Fatal(err)
+		}
+		// We only return the changes from the last statement.
+		if rows != 1 {
+			t.Errorf("RowsAffected got: %d want: %d", rows, 1)
+		}
+		id, err := res.LastInsertId()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if id != 3 {
+			t.Errorf("LastInsertId got: %d want: %d", id, 3)
+		}
+		var count int64
+		err = db.QueryRow(`SELECT COUNT(*) FROM foo WHERE id IN (1, 2, 3);`).Scan(&count)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if count != 3 {
+			t.Errorf("Expected count to be %d got: %d", 3, count)
+		}
+	}
+
+	t.Run("NoArgs", func(t *testing.T) {
+		const stmt = `
+		INSERT INTO foo(id) VALUES(1);
+		INSERT INTO foo(id) VALUES(2);
+		INSERT INTO foo(id) VALUES(3);`
+		test(t, stmt)
+	})
+
+	t.Run("WithArgs", func(t *testing.T) {
+		const stmt = `
+		INSERT INTO foo(id) VALUES(?);
+		INSERT INTO foo(id) VALUES(?);
+		INSERT INTO foo(id) VALUES(?);`
+		test(t, stmt, 1, 2, 3)
+	})
 }
 
 func testQuery(t *testing.T, seed bool, test func(t *testing.T, db *sql.DB)) {
@@ -1203,6 +1291,7 @@ func TestQuery(t *testing.T) {
 
 		// Comments
 		{"SELECT id FROM foo ORDER BY id; -- comment", nil},
+		{"SELECT id FROM foo ORDER BY id -- comment", nil}, // Not terminated
 		{"SELECT id FROM foo ORDER BY id;\n -- comment\n", nil},
 		{
 			`-- FOO
@@ -1223,6 +1312,29 @@ func TestQuery(t *testing.T) {
 				t.Fatalf("Query(%q, %v) = %v; want: %v", q.query, q.args, got, want)
 			}
 		})
+	}
+}
+
+// /Users/cvieth/go/src/github.com/mattn/go-sqlite3/sqlite3_test.go
+func TestIssue1161(t *testing.T) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	rows, err := db.Query(`SELECT 1;;`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for i := 0; rows.Next(); i++ {
+		if i > 100 {
+			t.Fatal("Next entered an infinite loop")
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -1266,13 +1378,119 @@ func TestQueryTooManyArgs(t *testing.T) {
 
 func TestQueryMultipleStatements(t *testing.T) {
 	testQueryError(t, "SELECT 1; SELECT 2;")
+	testQueryError(t, "SELECT 1; SELECT 2; SELECT 3;")
 }
 
 func TestQueryInvalidTable(t *testing.T) {
 	testQueryError(t, "SELECT COUNT(*) FROM does_not_exist;")
 }
 
+// WARN: do we need this ???
+func TestQueryStress(t *testing.T) {
+	// CREATE TABLE foo (id INTEGER)
+	tempFilename := TempFilename(t)
+	defer os.Remove(tempFilename)
+	db, err := sql.Open("sqlite3", tempFilename)
+	if err != nil {
+		t.Fatal("Failed to open database:", err)
+	}
+	defer db.Close()
+	const createTableStmt = `
+	CREATE TABLE testdb (
+		id         INTEGER,
+		name       TEXT,
+		data       BLOB,
+		created_at DATETIME
+	);
+	`
+	if _, err := db.Exec(createTableStmt); err != nil {
+		t.Fatal(err)
+	}
+	type Person struct {
+		ID        int
+		Name      string
+		Data      []byte
+		CreatedAt time.Time
+	}
+	people := []Person{
+		{1, "Olivia", []byte("Olivia"), time.Now()},
+		{2, "Emma", []byte("Emma"), time.Now()},
+		{3, "Charlotte", []byte("Charlotte"), time.Now()},
+		{4, "Amelia", []byte("Amelia"), time.Now()},
+		{5, "Ava", []byte("Ava"), time.Now()},
+		{6, "Sophia", []byte("Sophia"), time.Now()},
+		{7, "Isabella", []byte("Isabella"), time.Now()},
+		{8, "Mia", []byte("Mia"), time.Now()},
+		{9, "Evelyn", []byte("Evelyn"), time.Now()},
+		{10, "Harper", []byte("Harper"), time.Now()},
+	}
+	for _, p := range people {
+		_, err := db.Exec(`INSERT INTO testdb VALUES(?, ?, ?, ?);`,
+			p.ID, p.Name, []byte(p.Data), p.CreatedAt)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	// names := []string{
+	// 	"Olivia",
+	// 	"Emma",
+	// 	"Charlotte",
+	// 	"Amelia",
+	// 	"Ava",
+	// 	"Sophia",
+	// 	"Isabella",
+	// 	"Mia",
+	// 	"Evelyn",
+	// 	"Harper",
+	// }
+	// for i, name := range names {
+	// 	_, err := db.Exec(`INSERT INTO testdb VALUES(?, ?, ?, ?);`,
+	// 		i, name, []byte(name), time.Now())
+	// 	if err != nil {
+	// 		t.Fatal(err)
+	// 	}
+	// }
+
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 10_000; i++ {
+				target := people[i%len(people)]
+				rows, err := db.Query(`SELECT id, name, data, created_at FROM testdb WHERE name = ?;`,
+					strings.Clone(target.Name)) // Clone to make sure don't hold onto anything that gets GC'd
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				for rows.Next() {
+					var p Person
+					if err := rows.Scan(&p.ID, &p.Name, &p.Data, &p.CreatedAt); err != nil {
+						t.Error(err)
+						return
+					}
+					if p.ID != target.ID || p.Name != target.Name ||
+						!bytes.Equal(p.Data, target.Data) || !p.CreatedAt.Equal(target.CreatedAt) {
+						t.Errorf("got: %+v want: %+v", p, target)
+					}
+				}
+				if err := rows.Err(); err != nil {
+					t.Error(err)
+					return
+				}
+				if err := rows.Close(); err != nil {
+					t.Error(err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+}
+
 func TestStress(t *testing.T) {
+	t.Parallel()
 	tempFilename := TempFilename(t)
 	defer os.Remove(tempFilename)
 	db, err := sql.Open("sqlite3", tempFilename)
@@ -1284,7 +1502,11 @@ func TestStress(t *testing.T) {
 	db.Exec("INSERT INTO foo VALUES(2);")
 	db.Close()
 
-	for i := 0; i < 10000; i++ {
+	N := 10_000
+	if testing.Short() {
+		N = 1_000
+	}
+	for i := 0; i < N; i++ {
 		db, err := sql.Open("sqlite3", tempFilename)
 		if err != nil {
 			t.Fatal("Failed to open database:", err)
@@ -1379,6 +1601,35 @@ func TestVersion(t *testing.T) {
 	}
 }
 
+// The return value of unsafe.StringData is undefined if the string
+// is empty - so test that we handle that case.
+func TestEmptyString(t *testing.T) {
+	tempFilename := TempFilename(t)
+	defer os.Remove(tempFilename)
+	db, err := sql.Open("sqlite3", tempFilename)
+	if err != nil {
+		t.Fatal("Failed to open database:", err)
+	}
+	defer db.Close()
+
+	_, err = db.Exec(`create table foo (id integer, name text);`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`insert into foo values (?, ?);`, 1, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var id int
+	err = db.QueryRow(`select id from foo where name = ?;`, "").Scan(&id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != 1 {
+		t.Fatalf("Failed to match empty string in query got id: %d; want: 1", id)
+	}
+}
+
 func TestStringContainingZero(t *testing.T) {
 	tempFilename := TempFilename(t)
 	defer os.Remove(tempFilename)
@@ -1452,6 +1703,39 @@ func TestDateTimeNow(t *testing.T) {
 	err = db.QueryRow("SELECT datetime('now')").Scan(TimeStamp{&d})
 	if err != nil {
 		t.Fatal("Failed to scan datetime:", err)
+	}
+}
+
+// Test that we treat DATE, DATETIME, and TIMESTAMP as time types.
+func TestDatetimeColumnTypes(t *testing.T) {
+	db, err := sql.Open("sqlite3", t.TempDir()+"/test.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	const createTableStmt = `
+	CREATE TABLE time_test (
+		id INTEGER PRIMARY KEY NOT NULL,
+		t1 DATE NOT NULL,
+		t2 DATETIME NOT NULL,
+		t3 TIMESTAMP NOT NULL
+	);
+	INSERT INTO time_test VALUES (?, ?, ?, ?);`
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	if _, err := db.Exec(createTableStmt, 1, now, now, now); err != nil {
+		t.Fatal(err)
+	}
+
+	const selectQuery = `SELECT t1, t2, t3 FROM time_test WHERE id = 1;`
+
+	var t1, t2, t3 time.Time
+	if err := db.QueryRow(selectQuery).Scan(&t1, &t2, &t3); err != nil {
+		t.Fatal(err)
+	}
+	if !t1.Equal(now) || !t2.Equal(now) || !t3.Equal(now) {
+		t.Errorf("t1 = %s t2 = %s t3 = %s; want: %s", t1, t2, t3, now)
 	}
 }
 
@@ -2128,6 +2412,70 @@ func TestNamedParam(t *testing.T) {
 	}
 }
 
+func TestRowColumns(t *testing.T) {
+	db, err := sql.Open("sqlite3", t.TempDir()+"/test.db")
+	if err != nil {
+		t.Fatal("Failed to open database:", err)
+	}
+	defer db.Close()
+	columnNames := []string{
+		"INT",
+		"INTEGER",
+		"TINYINT",
+		"SMALLINT",
+		"MEDIUMINT",
+		"BIGINT",
+		"UNSIGNED BIG INT",
+		"INT2",
+		"INT8",
+		"INTEGER",
+		"CHARACTER(20)",
+		"VARCHAR(255)",
+		"VARYING",
+		"CHARACTER(255)",
+		"NCHAR(55)",
+		"NATIVE CHARACTER(70)",
+		"NVARCHAR(100)",
+		"TEXT",
+		"CLOB",
+		"BLOB",
+		"REAL",
+		"DOUBLE",
+		"DOUBLE PRECISION",
+		"NUMERIC",
+		"DECIMAL(10)",
+		"DECIMAL(5)",
+		"BOOLEAN",
+		"DATE",
+		"DATETIME",
+	}
+	cols := make([]string, len(columnNames))
+	for i, s := range columnNames {
+		cols[i] = fmt.Sprintf("c%d %s", i, s)
+	}
+	createStmt := "CREATE TABLE column_name_test (" + strings.Join(cols, ", ") + ")"
+	if _, err := db.Exec(createStmt); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := db.Query("SELECT * FROM column_name_test;")
+	if err != nil {
+		t.Fatal(err)
+	}
+	typs, err := rows.ColumnTypes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, ct := range typs {
+		if col := fmt.Sprintf("c%d", i); col != ct.Name() {
+			t.Errorf("Column %d: got name: %q want: %q", i, ct.Name(), col)
+		}
+		name := ct.DatabaseTypeName()
+		if name != columnNames[i] {
+			t.Errorf("Column %s: got type name: %q want: %q", ct.Name(), name, columnNames[i])
+		}
+	}
+}
+
 var customFunctionOnce sync.Once
 
 func BenchmarkCustomFunctions(b *testing.B) {
@@ -2170,7 +2518,8 @@ func TestSuite(t *testing.T) {
 }
 
 func BenchmarkSuite(b *testing.B) {
-	initializeTestDB(b)
+	// initializeTestDB(b)
+	initializeBenchDB(b)
 	defer freeTestDB()
 
 	for _, benchmark := range benchmarks {
@@ -2210,14 +2559,25 @@ func initializeTestDB(t testing.TB) {
 	db = &TestDB{t, d, SQLITE, sync.Once{}, tempFilename}
 }
 
+func initializeBenchDB(t testing.TB) {
+	d, err := sql.Open("sqlite3", "file:test.db?_busy_timeout=99999&mode=memory")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	db = &TestDB{t, d, SQLITE, sync.Once{}, ""}
+}
+
 func freeTestDB() {
 	err := db.DB.Close()
 	if err != nil {
 		panic(err)
 	}
-	err = os.Remove(db.tempFilename)
-	if err != nil {
-		panic(err)
+	if db.tempFilename != "" {
+		err := os.Remove(db.tempFilename)
+		if err != nil {
+			panic(err)
+		}
 	}
 }
 
@@ -2237,12 +2597,16 @@ var tests = []testing.InternalTest{
 
 var benchmarks = []testing.InternalBenchmark{
 	{Name: "BenchmarkExec", F: benchmarkExec},
+	{Name: "BenchmarkExecContext", F: benchmarkExecContext},
 	{Name: "BenchmarkQuery", F: benchmarkQuery},
+	{Name: "BenchmarkQueryContext", F: benchmarkQueryContext},
 	{Name: "BenchmarkParams", F: benchmarkParams},
 	{Name: "BenchmarkStmt", F: benchmarkStmt},
 	{Name: "BenchmarkRows", F: benchmarkRows},
 	{Name: "BenchmarkStmtRows", F: benchmarkStmtRows},
 	{Name: "BenchmarkExecStep", F: benchmarkExecStep},
+	{Name: "BenchmarkExecContextStep", F: benchmarkExecContextStep},
+	{Name: "BenchmarkPreparedQuery", F: benchmarkPreparedQuery},
 }
 
 func (db *TestDB) mustExec(sql string, args ...interface{}) sql.Result {
@@ -2597,6 +2961,16 @@ func benchmarkExec(b *testing.B) {
 	}
 }
 
+func benchmarkExecContext(b *testing.B) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	for i := 0; i < b.N; i++ {
+		if _, err := db.ExecContext(ctx, "select 1"); err != nil {
+			panic(err)
+		}
+	}
+}
+
 // benchmarkQuery is benchmark for query
 func benchmarkQuery(b *testing.B) {
 	for i := 0; i < b.N; i++ {
@@ -2606,6 +2980,23 @@ func benchmarkQuery(b *testing.B) {
 		var s string
 		//		var t time.Time
 		if err := db.QueryRow("select null, 1, 1.1, 'foo'").Scan(&n, &i, &f, &s); err != nil {
+			panic(err)
+		}
+	}
+}
+
+// benchmarkQueryContext is benchmark for QueryContext
+func benchmarkQueryContext(b *testing.B) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stmt, err := db.Prepare("select 1;")
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer stmt.Close()
+	for i := 0; i < b.N; i++ {
+		var i int64
+		if err := stmt.QueryRowContext(ctx).Scan(&i); err != nil {
 			panic(err)
 		}
 	}
@@ -2706,6 +3097,108 @@ var largeSelectStmt = strings.Repeat("select 1;\n", 1_000)
 func benchmarkExecStep(b *testing.B) {
 	for n := 0; n < b.N; n++ {
 		if _, err := db.Exec(largeSelectStmt); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func benchmarkExecContextStep(b *testing.B) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	for n := 0; n < b.N; n++ {
+		if _, err := db.ExecContext(ctx, largeSelectStmt); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func benchmarkPreparedQuery(b *testing.B) {
+	stmt, err := db.Prepare("SELECT 1;")
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer stmt.Close()
+	for i := 0; i < b.N; i++ {
+		var n int64
+		if err := stmt.QueryRow().Scan(&n); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func benchDB(t testing.TB) *sql.DB {
+	d, err := sql.Open("sqlite3", "file::memory:?_busy_timeout=99999")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := d.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	return d
+}
+
+func BenchmarkQueryDatetime(b *testing.B) {
+	db := benchDB(b)
+	const createTableStmt = `
+	CREATE TABLE bench (
+		id INTEGER NOT NULL,
+		time DATETIME NOT NULL
+	);`
+	if _, err := db.Exec(createTableStmt); err != nil {
+		b.Fatal(err)
+	}
+	now := time.Now()
+	if _, err := db.Exec(`INSERT INTO bench (id, time) VALUES (?, ?);`, 1, now); err != nil {
+		b.Fatal(err)
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		// db.QueryRow("SELECT id FROM bench WHERE time = ?;", now)
+		var id int64
+		err := db.QueryRow("SELECT id FROM bench WHERE time = ?;", now).Scan(&id)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+	// ins, err := db.Prepare(db.q("INSERT INTO t (count) VALUES (?)"))
+	// db.mustExec("CREATE TABLE t (count INT)")
+}
+
+var memory = flag.Bool("memory", false, "Use in memory database for benchmarks")
+
+func benchDatabase(t testing.TB) string {
+	if *memory {
+		return ":memory:"
+	}
+	return filepath.Join(t.TempDir(), "test.sqlite3")
+}
+
+func BenchmarkCacheOpen(b *testing.B) {
+	// d, err := sql.Open("sqlite3", tempFilename+"?_busy_timeout=99999")
+	// if err != nil {
+	// 	os.Remove(tempFilename)
+	// 	t.Fatal(err)
+	// }
+	// tmp := benchDatabase(b)
+	dsn := url.Values{
+		"_busy_timeout": []string{"99999"},
+		"_cache_size":   []string{"-20000"},
+		"_journal_mode": []string{"WAL"},
+		"_synchronous":  []string{"NORMAL"},
+		"_txlock:":      []string{"immediate"},
+	}
+	dataSourceName := ":memory:" + "?" + dsn.Encode()
+	for i := 0; i < b.N; i++ {
+		db, err := sql.Open("sqlite3", dataSourceName)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if err := db.Ping(); err != nil {
+			b.Fatal(err)
+		}
+		if err := db.Close(); err != nil {
 			b.Fatal(err)
 		}
 	}

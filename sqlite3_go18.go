@@ -30,6 +30,10 @@ func (c *SQLiteConn) QueryContext(ctx context.Context, query string, args []driv
 
 // ExecContext implement ExecerContext.
 func (c *SQLiteConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	// WARN WARN WARN WARN WARN WARN
+	if len(args) == 0 {
+		return c.execNoArgs(ctx, query)
+	}
 	return c.exec(ctx, query, args)
 }
 

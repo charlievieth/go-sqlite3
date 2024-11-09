@@ -106,6 +106,8 @@ type handleVal struct {
 var handleLock sync.Mutex
 var handleVals = make(map[unsafe.Pointer]handleVal)
 
+var connHandles = make(map[*SQLiteConn][]unsafe.Pointer)
+
 func newHandle(db *SQLiteConn, v interface{}) unsafe.Pointer {
 	handleLock.Lock()
 	defer handleLock.Unlock()
@@ -115,6 +117,8 @@ func newHandle(db *SQLiteConn, v interface{}) unsafe.Pointer {
 		panic("can't allocate 'cgo-pointer hack index pointer': ptr == nil")
 	}
 	handleVals[p] = val
+
+	connHandles[db] = append(connHandles[db], p)
 	return p
 }
 
@@ -129,14 +133,30 @@ func lookupHandle(handle unsafe.Pointer) interface{} {
 }
 
 func deleteHandles(db *SQLiteConn) {
+	// start := time.Now()
+	// defer func() {
+	// 	fmt.Println("Delete:", time.Since(start))
+	// }()
 	handleLock.Lock()
-	defer handleLock.Unlock()
-	for handle, val := range handleVals {
-		if val.db == db {
-			delete(handleVals, handle)
-			C.free(handle)
-		}
+	handles := connHandles[db]
+	for _, p := range handles {
+		delete(handleVals, p)
+		// C.free(p)
 	}
+	delete(connHandles, db)
+	handleLock.Unlock()
+
+	// We can do this outside the lock
+	for _, p := range handles {
+		C.free(p)
+	}
+
+	// for handle, val := range handleVals {
+	// 	if val.db == db {
+	// 		delete(handleVals, handle)
+	// 		C.free(handle)
+	// 	}
+	// }
 }
 
 // This is only here so that tests can refer to it.

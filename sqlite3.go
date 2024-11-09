@@ -126,6 +126,23 @@ _sqlite3_prepare_v2_internal(sqlite3 *db, const char *zSql, int nBytes, sqlite3_
 
 #endif
 
+// TODO: add paramCount
+static int _sqlite3_prepare_v2(sqlite3 *db, const char *zSql, int nBytes, sqlite3_stmt **ppStmt, int *oBytes) {
+	const char *tail = NULL;
+	int rv = _sqlite3_prepare_v2_internal(db, zSql, nBytes, ppStmt, &tail);
+	if (rv != SQLITE_OK) {
+		return rv;
+	}
+	if (tail == NULL) {
+		return rv; // NB: this should not happen
+	}
+	// Set oBytes to the number of bytes consumed instead of using the **pzTail
+	// out param since that requires storing a Go pointer in a C pointer, which
+	// is not allowed by CGO and will cause runtime.cgoCheckPointer to fail.
+	*oBytes = tail - zSql;
+	return rv;
+}
+
 void _sqlite3_result_text(sqlite3_context* ctx, const char* s) {
   sqlite3_result_text(ctx, s, -1, &free);
 }
@@ -145,6 +162,10 @@ static int _sqlite3_isspace(unsigned char c) {
 static int _sqlite3_prepare_query(sqlite3 *db, const char *zSql, int nBytes,
 	sqlite3_stmt **ppStmt, int *paramCount) {
 
+	// WARN: need to make sure nbytes is set !!!
+	if (nBytes < 0) {
+		nBytes = zSql ? strlen(zSql) : 0;
+	}
 	const char *tail = NULL;
 	int rc = sqlite3_prepare_v2(db, zSql, nBytes, ppStmt, &tail);
 	if (rc != SQLITE_OK) {
@@ -331,6 +352,42 @@ static void _sqlite3_column_decltypes(sqlite3_stmt* stmt, uint8_t *decls, int nd
 		}
 	}
 }
+
+// _sqlite3_exec_no_args
+int _sqlite3_exec_no_args(sqlite3 *db, const char *sql, int nbytes,
+                          int64_t *rowid, int64_t *changes) {
+	if (nbytes < 0) {
+		nbytes = strlen(sql);
+	}
+	sqlite3_stmt *stmt;
+	const char *tail = NULL;
+	while (*sql && nbytes > 0) {
+		stmt = NULL;
+		int rv = sqlite3_prepare_v2(db, sql, nbytes, &stmt, &tail);
+		if (rv != SQLITE_OK) {
+			return rv;
+		}
+
+		do {
+			rv = sqlite3_step(stmt);
+		} while (rv == SQLITE_ROW);
+
+		*rowid = sqlite3_last_insert_rowid(db);
+		*changes = sqlite3_changes64(db);
+
+		if (rv != SQLITE_OK && rv != SQLITE_DONE) {
+			sqlite3_finalize(stmt);
+			return rv;
+		}
+		rv = sqlite3_finalize(stmt);
+		if (rv != SQLITE_OK) {
+			return rv;
+		}
+		nbytes -= tail - sql;
+		sql = tail;
+	}
+	return SQLITE_OK;
+}
 */
 import "C"
 import (
@@ -349,6 +406,8 @@ import (
 	"syscall"
 	"time"
 	"unsafe"
+
+	"github.com/charlievieth/go-sqlite3/internal/timefmt"
 )
 
 // SQLiteTimestampFormats is timestamp formats understood by both this module
@@ -375,8 +434,10 @@ const (
 	columnTimestamp string = "timestamp"
 )
 
+// TODO: this should be renamed to prevent collisions with mattn/go-sqlite3
+//
 // This variable can be replaced with -ldflags like below:
-// go build -ldflags="-X 'github.com/mattn/go-sqlite3.driverName=my-sqlite3'"
+// go build -ldflags="-X 'github.com/charlievieth/go-sqlite3.driverName=my-sqlite3'"
 var driverName = "sqlite3"
 
 func init() {
@@ -510,7 +571,7 @@ type SQLiteStmt struct {
 	c      *SQLiteConn
 	s      *C.sqlite3_stmt
 	closed bool
-	cls    bool
+	cls    bool // TODO: document this field and why it's set
 }
 
 // SQLiteResult implements sql.Result.
@@ -522,7 +583,7 @@ type SQLiteResult struct {
 // SQLiteRows implements driver.Rows.
 type SQLiteRows struct {
 	s        *SQLiteStmt
-	nc       int
+	nc       int // TODO: use a smaller type the max number of columns is 32,767
 	cols     []string
 	decltype []string // declared column type (lowercase)
 	dtype    []uint8  // minimal declared column type (either time or bool)
@@ -606,6 +667,7 @@ func (ai *aggInfo) Step(ctx *C.sqlite3_context, argv []*C.sqlite3_value) {
 		return
 	}
 
+	// TODO: remove this https://github.com/charlievieth/go-sqlite3/issues/1010
 	ret := agg.MethodByName("Step").Call(args)
 	if len(ret) == 1 && ret[0].Interface() != nil {
 		callbackError(ctx, ret[0].Interface().(error))
@@ -621,6 +683,7 @@ func (ai *aggInfo) Done(ctx *C.sqlite3_context) {
 	}
 	defer func() { delete(ai.active, idx) }()
 
+	// TODO: remove this https://github.com/charlievieth/go-sqlite3/issues/1010
 	ret := agg.MethodByName("Done").Call(nil)
 	if len(ret) == 2 && ret[1].Interface() != nil {
 		callbackError(ctx, ret[1].Interface().(error))
@@ -636,6 +699,7 @@ func (ai *aggInfo) Done(ctx *C.sqlite3_context) {
 
 // Commit transaction.
 func (tx *SQLiteTx) Commit() error {
+	// TODO: this should use the Context the TX was created with
 	_, err := tx.c.exec(context.Background(), "COMMIT", nil)
 	if err != nil {
 		// sqlite3 may leave the transaction open in this scenario.
@@ -817,6 +881,11 @@ func sqlite3CreateFunction(db *C.sqlite3, zFunctionName *C.char, nArg C.int, eTe
 	return C._sqlite3_create_function(db, zFunctionName, nArg, eTextRep, C.uintptr_t(uintptr(pApp)), (*[0]byte)(xFunc), (*[0]byte)(xStep), (*[0]byte)(xFinal))
 }
 
+// TODO: remove this it breaks dead code elimination and is not widely used the
+// below GitHub search returns 71 matches (though the real number is likely lower):
+//
+//	`.RegisterAggregator( language:go AND NOT path:_example AND NOT is:fork AND NOT is:vendored`
+//
 // RegisterAggregator makes a Go type available as a SQLite aggregation function.
 //
 // Because aggregation is incremental, it's implemented in Go with a
@@ -857,6 +926,7 @@ func (c *SQLiteConn) RegisterAggregator(name string, impl interface{}, pure bool
 	default:
 		return errors.New("SQlite aggregator constructor must return a pointer object")
 	}
+	// TODO: remove this https://github.com/charlievieth/go-sqlite3/issues/1010
 	stepFn, found := agg.MethodByName("Step")
 	if !found {
 		return errors.New("SQlite aggregator doesn't have a Step() function")
@@ -898,6 +968,7 @@ func (c *SQLiteConn) RegisterAggregator(name string, impl interface{}, pure bool
 		stepNArgs = -1
 	}
 
+	// TODO: remove this https://github.com/charlievieth/go-sqlite3/issues/1010
 	doneFn, found := agg.MethodByName("Done")
 	if !found {
 		return errors.New("SQlite aggregator doesn't have a Done() function")
@@ -980,6 +1051,10 @@ func lastError(db *C.sqlite3) error {
 
 // Exec implements Execer.
 func (c *SQLiteConn) Exec(query string, args []driver.Value) (driver.Result, error) {
+	// WARN WARN WARN WARN WARN WARN
+	if len(args) == 0 {
+		return c.execNoArgs(context.Background(), query)
+	}
 	list := make([]driver.NamedValue, len(args))
 	for i, v := range args {
 		list[i] = driver.NamedValue{
@@ -990,21 +1065,80 @@ func (c *SQLiteConn) Exec(query string, args []driver.Value) (driver.Result, err
 	return c.exec(context.Background(), query, list)
 }
 
-func (c *SQLiteConn) exec(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
-	pquery := C.CString(query)
-	op := pquery // original pointer
-	defer C.free(unsafe.Pointer(op))
+func (c *SQLiteConn) execNoArgsSync(query string) (_ driver.Result, err error) {
+	// Trim the query. This is mostly important for getting rid
+	// of any trailing space.
+	query = strings.TrimSpace(query)
 
-	var stmtArgs []driver.NamedValue
-	var tail *C.char
-	s := new(SQLiteStmt) // escapes to the heap so reuse it
-	start := 0
+	var rowid, changes C.int64_t
+	rv := C._sqlite3_exec_no_args(c.db, (*C.char)(unsafe.Pointer(stringData(query))),
+		C.int(len(query)), &rowid, &changes)
+	if rv != C.SQLITE_OK {
+		err = c.lastError()
+	}
+	return &SQLiteResult{id: int64(rowid), changes: int64(changes)}, err
+}
+
+func (c *SQLiteConn) execNoArgs(ctx context.Context, query string) (driver.Result, error) {
+	done := ctx.Done()
+	if done == nil {
+		return c.execNoArgsSync(query)
+	}
+
+	if err := ctx.Err(); err != nil {
+		return nil, err // WARN: return a Result ???
+	}
+
+	// WARN: we must wait for this to exit before we exit otherwise
+	// we might interrupt an unrelated operation (though this is
+	// still racy).
+	ch := make(chan struct{})
+	defer close(ch)
+	go func() {
+		select {
+		case <-done:
+			C.sqlite3_interrupt(c.db)
+			// Wait until signalled. We need to ensure that this goroutine
+			// will not call interrupt after this method returns, which is
+			// why we can't check if only done is closed when waiting below.
+			<-ch
+		case <-ch:
+		}
+	}()
+
+	res, err := c.execNoArgsSync(query)
+	if isInterruptErr(err) {
+		// TODO: this matches the original behavior, but if the query
+		// was cancelled by another goroutine and our Context is not
+		// cancelled then the error may be nil and the operation would
+		// not have completed.
+		err = ctx.Err()
+	}
+
+	// Stop the goroutine and make sure we're at a point where
+	// sqlite3_interrupt cannot be called again.
+	ch <- struct{}{}
+
+	return res, err
+}
+
+func (c *SQLiteConn) exec(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	var (
+		stmtArgs []driver.NamedValue
+		start    int
+		s        SQLiteStmt // escapes to the heap so reuse it
+		sz       C.int      // number of query bytes consumed: escapes to the heap
+	)
+	query = strings.TrimSpace(query)
 	for {
-		*s = SQLiteStmt{c: c} // reset
-		rv := C._sqlite3_prepare_v2_internal(c.db, pquery, C.int(-1), &s.s, &tail)
+		s = SQLiteStmt{c: c} // reset
+		sz = 0
+		rv := C._sqlite3_prepare_v2(c.db, (*C.char)(unsafe.Pointer(stringData(query))),
+			C.int(len(query)), &s.s, &sz)
 		if rv != C.SQLITE_OK {
 			return nil, c.lastError()
 		}
+		query = strings.TrimSpace(query[sz:])
 
 		var res driver.Result
 		if s.s != nil {
@@ -1016,6 +1150,9 @@ func (c *SQLiteConn) exec(ctx context.Context, query string, args []driver.Named
 			// consume the number of arguments used in the current
 			// statement and append all named arguments not
 			// contained therein
+			if stmtArgs == nil {
+				stmtArgs = make([]driver.NamedValue, 0, na)
+			}
 			stmtArgs = append(stmtArgs[:0], args[start:start+na]...)
 			for i := range args {
 				if (i < start || i >= na) && args[i].Name != "" {
@@ -1034,14 +1171,13 @@ func (c *SQLiteConn) exec(ctx context.Context, query string, args []driver.Named
 			start += na
 		}
 		s.finalize()
-		if tail == nil || *tail == '\000' {
+		if len(query) == 0 {
 			if res == nil {
 				// https://github.com/mattn/go-sqlite3/issues/963
 				res = &SQLiteResult{0, 0}
 			}
 			return res, nil
 		}
-		pquery = tail
 	}
 }
 
@@ -1071,8 +1207,8 @@ func (c *SQLiteConn) query(ctx context.Context, query string, args []driver.Name
 		return nil, c.lastError()
 	}
 	if s.s == nil {
-		// WARN: make sure this is correct
-		return closedRows, nil // TODO: is this an error?
+		// TODO: make sure this is correct and not an error
+		return closedRows, nil
 	}
 
 	na := int(paramCount)
@@ -1619,6 +1755,18 @@ func (d *SQLiteDriver) Open(dsn string) (driver.Conn, error) {
 		return nil
 	}
 
+	// buf := make([]byte, 32)
+	// execf := func(format string, v ...any) error {
+	// 	buf = fmt.Appendf(buf[:0], format, v...)
+	// 	buf = append(buf, 0)
+	// 	rv := C.sqlite3_exec(db, (*C.char)(unsafe.Pointer(&buf[0])), nil, nil, nil)
+	// 	if rv != C.SQLITE_OK {
+	// 		return lastError(db)
+	// 	}
+	// 	return nil
+	// }
+	// _ = execf
+
 	// Busy timeout
 	if err := exec(fmt.Sprintf("PRAGMA busy_timeout = %d;", busyTimeout)); err != nil {
 		C.sqlite3_close_v2(db)
@@ -1915,6 +2063,7 @@ func (d *SQLiteDriver) Open(dsn string) (driver.Conn, error) {
 
 // Close the connection.
 func (c *SQLiteConn) Close() error {
+	// TODO: test double close
 	rv := C.sqlite3_close_v2(c.db)
 	if rv != C.SQLITE_OK {
 		return c.lastError()
@@ -1923,7 +2072,7 @@ func (c *SQLiteConn) Close() error {
 	c.mu.Lock()
 	c.db = nil
 	c.mu.Unlock()
-	runtime.SetFinalizer(c, nil)
+	runtime.SetFinalizer(c, nil) // WARN: not ran if error
 	return nil
 }
 
@@ -1949,6 +2098,7 @@ func (c *SQLiteConn) prepare(ctx context.Context, query string) (driver.Stmt, er
 	if rv != C.SQLITE_OK {
 		return nil, c.lastError()
 	}
+	// TODO: return an error if the SQL has more than one statement
 	ss := &SQLiteStmt{c: c, s: s, cls: false}
 	runtime.SetFinalizer(ss, (*SQLiteStmt).Close)
 	return ss, nil
@@ -2028,6 +2178,8 @@ func (s *SQLiteStmt) Close() error {
 		return nil
 	}
 	s.closed = true
+	// NB: safe to remove finalizer here
+	runtime.SetFinalizer(s, nil) // WARN: changed this to be here
 	if !s.c.dbConnOpen() {
 		return errors.New("sqlite statement with already closed database connection")
 	}
@@ -2036,7 +2188,6 @@ func (s *SQLiteStmt) Close() error {
 	if rv != C.SQLITE_OK {
 		return s.c.lastError()
 	}
-	runtime.SetFinalizer(s, nil)
 	return nil
 }
 
@@ -2049,31 +2200,99 @@ func (s *SQLiteStmt) finalize() {
 
 // NumInput return a number of parameters.
 func (s *SQLiteStmt) NumInput() int {
+	// TODO: cache the result of this
 	return int(C.sqlite3_bind_parameter_count(s.s))
 }
 
 var placeHolder = []byte{0}
 
+func hasNamedArgs(args []driver.NamedValue) bool {
+	for _, v := range args {
+		if v.Name != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// TODO: return the column count as well
 func (s *SQLiteStmt) bind(args []driver.NamedValue) error {
 	rv := C.sqlite3_reset(s.s)
 	if rv != C.SQLITE_ROW && rv != C.SQLITE_OK && rv != C.SQLITE_DONE {
 		return s.c.lastError()
 	}
 
+	if hasNamedArgs(args) {
+		return s.bindIndices(args)
+	}
+
+	for _, arg := range args {
+		n := C.int(arg.Ordinal)
+		switch v := arg.Value.(type) {
+		case nil:
+			rv = C.sqlite3_bind_null(s.s, n)
+		case string:
+			p := stringData(v)
+			rv = C._sqlite3_bind_text(s.s, n, (*C.char)(unsafe.Pointer(p)), C.int(len(v)))
+		case int64:
+			rv = C.sqlite3_bind_int64(s.s, n, C.sqlite3_int64(v))
+		case bool:
+			val := 0
+			if v {
+				val = 1
+			}
+			rv = C.sqlite3_bind_int(s.s, n, C.int(val))
+		case float64:
+			rv = C.sqlite3_bind_double(s.s, n, C.double(v))
+		case []byte:
+			if v == nil {
+				rv = C.sqlite3_bind_null(s.s, n)
+			} else {
+				ln := len(v)
+				if ln == 0 {
+					v = placeHolder
+				}
+				rv = C._sqlite3_bind_blob(s.s, n, unsafe.Pointer(&v[0]), C.int(ln))
+			}
+		case time.Time:
+			// TODO: use a reusable buffer
+			b := timefmt.Format(v)
+			rv = C._sqlite3_bind_text(s.s, n, (*C.char)(unsafe.Pointer(&b[0])), C.int(len(b)))
+		}
+		if rv != C.SQLITE_OK {
+			return s.c.lastError()
+		}
+	}
+	return nil
+}
+
+func (s *SQLiteStmt) bindIndices(args []driver.NamedValue) error {
+	// Find the longest named parameter name.
+	n := 0
+	for _, v := range args {
+		if m := len(v.Name); m > n {
+			n = m
+		}
+	}
+	buf := make([]byte, 0, n+2) // +2 for placeholder and null terminator
+
+	// TODO: Reduce the size of this slive by using uint32 or uint16.
+	// By default SQLITE_MAX_FUNCTION_ARG is 100 so uint16 should work.
 	bindIndices := make([][3]int, len(args))
-	prefixes := []string{":", "@", "$"}
 	for i, v := range args {
 		bindIndices[i][0] = args[i].Ordinal
 		if v.Name != "" {
-			for j := range prefixes {
-				cname := C.CString(prefixes[j] + v.Name)
-				bindIndices[i][j] = int(C.sqlite3_bind_parameter_index(s.s, cname))
-				C.free(unsafe.Pointer(cname))
+			for j, c := range []byte{':', '@', '$'} {
+				buf = append(buf[:0], c)
+				buf = append(buf, v.Name...)
+				buf = append(buf, 0)
+				bindIndices[i][j] = int(C.sqlite3_bind_parameter_index(s.s, (*C.char)(unsafe.Pointer(&buf[0]))))
 			}
 			args[i].Ordinal = bindIndices[i][0]
 		}
 	}
 
+	var rv C.int
 	for i, arg := range args {
 		for j := range bindIndices[i] {
 			if bindIndices[i][j] == 0 {
@@ -2084,20 +2303,16 @@ func (s *SQLiteStmt) bind(args []driver.NamedValue) error {
 			case nil:
 				rv = C.sqlite3_bind_null(s.s, n)
 			case string:
-				if len(v) == 0 {
-					rv = C._sqlite3_bind_text(s.s, n, (*C.char)(unsafe.Pointer(&placeHolder[0])), C.int(0))
-				} else {
-					b := []byte(v)
-					rv = C._sqlite3_bind_text(s.s, n, (*C.char)(unsafe.Pointer(&b[0])), C.int(len(b)))
-				}
+				p := stringData(v)
+				rv = C._sqlite3_bind_text(s.s, n, (*C.char)(unsafe.Pointer(p)), C.int(len(v)))
 			case int64:
 				rv = C.sqlite3_bind_int64(s.s, n, C.sqlite3_int64(v))
 			case bool:
+				val := 0
 				if v {
-					rv = C.sqlite3_bind_int(s.s, n, 1)
-				} else {
-					rv = C.sqlite3_bind_int(s.s, n, 0)
+					val = 1
 				}
+				rv = C.sqlite3_bind_int(s.s, n, C.int(val))
 			case float64:
 				rv = C.sqlite3_bind_double(s.s, n, C.double(v))
 			case []byte:
@@ -2111,7 +2326,7 @@ func (s *SQLiteStmt) bind(args []driver.NamedValue) error {
 					rv = C._sqlite3_bind_blob(s.s, n, unsafe.Pointer(&v[0]), C.int(ln))
 				}
 			case time.Time:
-				b := []byte(v.Format(SQLiteTimestampFormats[0]))
+				b := timefmt.Format(v)
 				rv = C._sqlite3_bind_text(s.s, n, (*C.char)(unsafe.Pointer(&b[0])), C.int(len(b)))
 			}
 			if rv != C.SQLITE_OK {
@@ -2175,9 +2390,11 @@ func (s *SQLiteStmt) Exec(args []driver.Value) (driver.Result, error) {
 }
 
 func isInterruptErr(err error) bool {
-	sqliteErr, ok := err.(Error)
-	if ok {
-		return sqliteErr.Code == ErrInterrupt
+	if err != nil {
+		sqliteErr, ok := err.(Error)
+		if ok {
+			return sqliteErr.Code == ErrInterrupt
+		}
 	}
 	return false
 }
@@ -2238,6 +2455,7 @@ func (s *SQLiteStmt) execSync(args []driver.NamedValue) (driver.Result, error) {
 //
 // See: https://sqlite.org/c3ref/stmt_readonly.html
 func (s *SQLiteStmt) Readonly() bool {
+	// TODO: cache the result of this
 	return C.sqlite3_stmt_readonly(s.s) == 1
 }
 
@@ -2264,6 +2482,10 @@ func (rc *SQLiteRows) Close() error {
 
 // Columns return column names.
 func (rc *SQLiteRows) Columns() []string {
+	// CEV: this is called once by sql.Rows.Next() to get the number
+	// of columns in the result (which is annoying).
+	//
+	// TODO: maybe we can intern some of these strings
 	rc.s.mu.Lock()
 	defer rc.s.mu.Unlock()
 	if rc.s.s != nil && rc.nc != len(rc.cols) {
@@ -2275,11 +2497,38 @@ func (rc *SQLiteRows) Columns() []string {
 	return rc.cols
 }
 
+func declTypeStr(typ string) string {
+	switch typ {
+	case "BLOB", "blob":
+		return "blob"
+	case "BOOL", "bool":
+		return "boolean"
+	case "BOOLEAN", "boolean":
+		return "boolean"
+	case "DATETIME", "datetime":
+		return "datetime"
+	case "INT", "int":
+		return "int"
+	case "INTEGER", "integer":
+		return "integer"
+	case "TEXT", "text":
+		return "text"
+	case "TIMESTAMP", "timestamp":
+		return "timestamp"
+	default:
+		return strings.ToLower(typ)
+	}
+}
+
 func (rc *SQLiteRows) declTypes() []string {
 	if rc.s.s != nil && rc.decltype == nil {
+		if rc.nc == 0 {
+			return nil
+		}
 		rc.decltype = make([]string, rc.nc)
 		for i := 0; i < rc.nc; i++ {
-			rc.decltype[i] = strings.ToLower(C.GoString(C.sqlite3_column_decltype(rc.s.s, C.int(i))))
+			typ := C.GoString(C.sqlite3_column_decltype(rc.s.s, C.int(i)))
+			rc.decltype[i] = declTypeStr(typ)
 		}
 	}
 	return rc.decltype
@@ -2407,8 +2656,11 @@ func (rc *SQLiteRows) nextSyncLocked(dest []driver.Value) error {
 			dest[i] = nil
 		case C.SQLITE_TEXT:
 			r := C._sqlite3_column_text(rc.s.s, C.int(i))
+			// TODO: for dates we can just parse the raw *char without
+			// converting it to a Go string.
 			s := C.GoStringN((*C.char)(unsafe.Pointer(r.value)), r.bytes)
 
+			// WARN: we should return an error here if the date cannot be parsed !!!
 			if rc.dtype[i] == C.GO_SQLITE3_DATE_TYPE {
 				var err error
 				var t time.Time
@@ -2445,3 +2697,228 @@ func stringData(s string) *byte {
 	// is unspecified if the string is empty.
 	return &placeHolder[0]
 }
+
+// // func (rc *SQLiteRows) isDateTime(idx int) bool {
+// // 	if rc.s.s == nil {
+// // 		return false
+// // 	}
+// // 	if rc.cts == nil {
+// // 		rc.cts = make([]uint8, rc.nc)
+// // 	}
+// // 	if rc.cts[idx] == 0 {
+// // 		rv := C._sqlite3_column_decltype_internal(rc.s.s, C.int(idx))
+// // 		if rv == 0 {
+// // 			rc.cts[idx] = 1
+// // 		} else {
+// // 			rc.cts[idx] = 2
+// // 		}
+// // 	}
+// // 	return rc.cts[idx] == 2
+// // }
+//
+// // TODO: rename to strcasecmp or something since we don't actually fold
+// func equalFold(s []byte, t string) bool {
+// 	if len(s) != len(t) {
+// 		return false
+// 	}
+// 	if string(s) == t {
+// 		return true
+// 	}
+// 	for i := 0; i < len(s) && i < len(t); i++ {
+// 		sr := s[i]
+// 		tr := t[i]
+// 		// Easy case.
+// 		if tr == sr {
+// 			continue
+// 		}
+// 		// Make sr < tr to simplify what follows.
+// 		if tr < sr {
+// 			tr, sr = sr, tr
+// 		}
+// 		if 'A' <= sr && sr <= 'Z' && tr == sr+'a'-'A' {
+// 			continue
+// 		}
+// 		return false
+// 	}
+// 	return true
+// }
+//
+// // WARN: the name here almost collides with the field
+// //
+// // TODO TODO TODO TODO TODO TODO TODO
+// // TODO: test this use C.CString()
+// // TODO TODO TODO TODO TODO TODO TODO
+// func (rc *SQLiteRows) declType(idx int) string {
+// 	// if rc.s.s == nil {
+// 	// 	return ""
+// 	// }
+// 	// if rc.decltype == nil {
+// 	// 	rc.decltype = make([]string, rc.nc)
+// 	// }
+//
+// 	// WARN: disabling for testing
+// 	// TODO: we don't need this
+// 	// if s := rc.decltype[idx]; s != "" {
+// 	// 	return s
+// 	// }
+//
+// 	p := (*[1 << 29]byte)(unsafe.Pointer(C.sqlite3_column_decltype(rc.s.s, C.int(idx))))
+// 	if p == nil {
+// 		return ""
+// 	}
+// 	var n int
+// 	for i, c := range p {
+// 		if c == 0 {
+// 			n = i
+// 			break
+// 		}
+// 	}
+// 	b := unsafe.Slice(&p[0], n)
+// 	switch b[0] {
+// 	case 'b', 'B':
+// 		if equalFold(b, "BLOB") {
+// 			return "blob"
+// 		}
+// 		if equalFold(b, "BOOLEAN") {
+// 			return "boolean"
+// 		}
+// 	case 'd', 'D':
+// 		if equalFold(b, "DATE") {
+// 			return "date"
+// 		}
+// 		if equalFold(b, "DATETIME") {
+// 			return "datetime"
+// 		}
+// 	case 'i', 'I':
+// 		if equalFold(b, "INTEGER") {
+// 			return "integer"
+// 		}
+// 	case 'r', 'R':
+// 		if equalFold(b, "REAL") {
+// 			return "real"
+// 		}
+// 	case 't', 'T':
+// 		if equalFold(b, "TIMESTAMP") {
+// 			return "timestamp"
+// 		}
+// 	}
+// 	// s := string(b)
+// 	// if v, ok := internedDeclTypes.Load(s); ok {
+// 	// 	return v.(string)
+// 	// }
+// 	// if numInternedDeclTypes.Load() < 128 {
+// 	// 	if numInternedDeclTypes.Add(1) <= 128 {
+// 	// 		v, loaded := internedDeclTypes.LoadOrStore(s, strings.ToLower(s))
+// 	// 		if loaded {
+// 	// 			s = v.(string)
+// 	// 		}
+// 	// 		return s
+// 	// 	}
+// 	// }
+// 	return strings.ToLower(string(b))
+// }
+//
+// var (
+// 	internedDeclTypes    sync.Map
+// 	numInternedDeclTypes atomic.Int32
+// )
+// var internedDeclTypesX struct {
+// 	sync.RWMutex
+// 	typs map[string]string
+// }
+//
+// func parseDeclType(cstr *C.char) string {
+// 	// if rc.s.s == nil {
+// 	// 	return ""
+// 	// }
+// 	// if rc.decltype == nil {
+// 	// 	rc.decltype = make([]string, rc.nc)
+// 	// }
+//
+// 	// WARN: disabling for testing
+// 	// TODO: we don't need this
+// 	// if s := rc.decltype[idx]; s != "" {
+// 	// 	return s
+// 	// }
+//
+// 	p := (*[1 << 29]byte)(unsafe.Pointer(cstr))
+// 	if p == nil {
+// 		return ""
+// 	}
+// 	var n int
+// 	for i, c := range p {
+// 		if c == 0 {
+// 			n = i
+// 			break
+// 		}
+// 	}
+// 	b := unsafe.Slice(&p[0], n)
+// 	switch b[0] {
+// 	case 'b', 'B':
+// 		if equalFold(b, "BLOB") {
+// 			return "blob"
+// 		}
+// 		if equalFold(b, "BOOLEAN") {
+// 			return "boolean"
+// 		}
+// 	case 'd', 'D':
+// 		if equalFold(b, "DATE") {
+// 			return "date"
+// 		}
+// 		if equalFold(b, "DATETIME") {
+// 			return "datetime"
+// 		}
+// 	case 'i', 'I':
+// 		if equalFold(b, "INTEGER") {
+// 			return "integer"
+// 		}
+// 	case 'r', 'R':
+// 		if equalFold(b, "REAL") {
+// 			return "real"
+// 		}
+// 	case 't', 'T':
+// 		if equalFold(b, "TIMESTAMP") {
+// 			return "timestamp"
+// 		}
+// 	}
+//
+// 	m := &internedDeclTypesX
+// 	m.RLock()
+// 	v := m.typs[string(b)]
+// 	sz := len(m.typs)
+// 	m.RUnlock()
+// 	if v != "" {
+// 		return v
+// 	}
+// 	if sz < 128 {
+// 		m.Lock()
+// 		if m.typs == nil {
+// 			m.typs = make(map[string]string, 128)
+// 		}
+// 		if len(m.typs) < 128 {
+// 			s := string(b)
+// 			l := strings.ToLower(s)
+// 			m.typs[s] = l
+// 			m.Unlock()
+// 			return l
+// 		}
+// 		m.Unlock()
+// 	}
+// 	return strings.ToLower(string(b))
+//
+// 	// s := string(b)
+// 	// if v, ok := internedDeclTypes.Load(s); ok {
+// 	// 	return v.(string)
+// 	// }
+// 	// if numInternedDeclTypes.Load() < 128 {
+// 	// 	if numInternedDeclTypes.Add(1) <= 128 {
+// 	// 		v, loaded := internedDeclTypes.LoadOrStore(s, strings.ToLower(s))
+// 	// 		if loaded {
+// 	// 			s = v.(string)
+// 	// 		}
+// 	// 		return s
+// 	// 	}
+// 	// }
+// 	// return strings.ToLower(string(b))
+// 	// return strings.ToLower(string((*p)[:n]))
+// }
