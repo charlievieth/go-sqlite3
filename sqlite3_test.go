@@ -10,6 +10,7 @@ package sqlite3
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"database/sql/driver"
 	"errors"
@@ -1141,6 +1142,66 @@ func TestQueryer(t *testing.T) {
 	}
 }
 
+// Test that an empty query does not error or result in an infinite loop.
+func TestEmptyQuery(t *testing.T) {
+	db, err := sql.Open("sqlite3", t.TempDir()+"/test.sqlite3")
+	if err != nil {
+		t.Fatal("Failed to open database:", err)
+	}
+	defer db.Close()
+	if err := db.QueryRow("").Scan(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// This test ensures that we implement the bug where only the last SQL
+// statement passed to Query is executed. See issues #950 and #1161.
+//
+// This bug should probably be fixed at some point since any code that
+// relies on it is subtly wrong and exposing this bug to users would be
+// to their benefit, but for now let's ensure that any changes to Query
+// maintain the current/buggy behavior.
+func TestMulipleStatementQueryBug(t *testing.T) {
+	db, err := sql.Open("sqlite3", t.TempDir()+"/test.sqlite3")
+	if err != nil {
+		t.Fatal("Failed to open database:", err)
+	}
+	defer db.Close()
+
+	t.Run("Rows", func(t *testing.T) {
+		rows, err := db.Query(`SELECT ?; SELECT ?;`, 1, 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var vals []int64
+		for rows.Next() {
+			var v int64
+			if err := rows.Scan(&v); err != nil {
+				t.Fatal(err)
+			}
+			vals = append(vals, v)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(vals, []int64{2}) {
+			t.Fatalf("Expected only the last query to be executed got: %v: want: %v",
+				vals, []int64{2})
+		}
+	})
+
+	t.Run("QueryRow", func(t *testing.T) {
+		var v int64
+		if err := db.QueryRow(`SELECT ?; SELECT ?;`, 1, 2).Scan(&v); err != nil {
+			t.Fatal(err)
+		}
+		if v != 2 {
+			t.Fatalf("Expected only the last query to be executed got: %v: want: %v",
+				v, 2)
+		}
+	})
+}
+
 func TestStress(t *testing.T) {
 	tempFilename := TempFilename(t)
 	defer os.Remove(tempFilename)
@@ -2030,7 +2091,7 @@ func BenchmarkCustomFunctions(b *testing.B) {
 }
 
 func TestSuite(t *testing.T) {
-	initializeTestDB(t)
+	initializeTestDB(t, false)
 	defer freeTestDB()
 
 	for _, test := range tests {
@@ -2039,7 +2100,7 @@ func TestSuite(t *testing.T) {
 }
 
 func BenchmarkSuite(b *testing.B) {
-	initializeTestDB(b)
+	initializeTestDB(b, true)
 	defer freeTestDB()
 
 	for _, benchmark := range benchmarks {
@@ -2068,8 +2129,13 @@ type TestDB struct {
 
 var db *TestDB
 
-func initializeTestDB(t testing.TB) {
-	tempFilename := TempFilename(t)
+func initializeTestDB(t testing.TB, memory bool) {
+	var tempFilename string
+	if memory {
+		tempFilename = ":memory:"
+	} else {
+		tempFilename = TempFilename(t)
+	}
 	d, err := sql.Open("sqlite3", tempFilename+"?_busy_timeout=99999")
 	if err != nil {
 		os.Remove(tempFilename)
@@ -2084,9 +2150,11 @@ func freeTestDB() {
 	if err != nil {
 		panic(err)
 	}
-	err = os.Remove(db.tempFilename)
-	if err != nil {
-		panic(err)
+	if db.tempFilename != "" && db.tempFilename != ":memory:" {
+		err := os.Remove(db.tempFilename)
+		if err != nil {
+			panic(err)
+		}
 	}
 }
 
@@ -2107,6 +2175,8 @@ var tests = []testing.InternalTest{
 var benchmarks = []testing.InternalBenchmark{
 	{Name: "BenchmarkExec", F: benchmarkExec},
 	{Name: "BenchmarkQuery", F: benchmarkQuery},
+	{Name: "BenchmarkQuerySimple", F: benchmarkQuerySimple},
+	{Name: "BenchmarkQueryContext", F: benchmarkQueryContext},
 	{Name: "BenchmarkParams", F: benchmarkParams},
 	{Name: "BenchmarkStmt", F: benchmarkStmt},
 	{Name: "BenchmarkRows", F: benchmarkRows},
@@ -2477,6 +2547,75 @@ func benchmarkQuery(b *testing.B) {
 			panic(err)
 		}
 	}
+}
+
+// Simple query to benchmark the construction/execution of sqlite3 queries.
+func benchmarkQuerySimple(b *testing.B) {
+	var n int64
+	for i := 0; i < b.N; i++ {
+		if err := db.QueryRow("select ?;", int64(1)).Scan(&n); err != nil {
+			panic(err)
+		}
+	}
+}
+
+// benchmarkQueryContext is benchmark for QueryContext
+func benchmarkQueryContext(b *testing.B) {
+	const createTableStmt = `
+	CREATE TABLE IF NOT EXISTS query_context(
+		id INTEGER PRIMARY KEY
+	);
+	DELETE FROM query_context;
+	VACUUM;`
+	test := func(ctx context.Context, b *testing.B) {
+		if _, err := db.Exec(createTableStmt); err != nil {
+			b.Fatal(err)
+		}
+		for i := 0; i < 10; i++ {
+			_, err := db.Exec("INSERT INTO query_context VALUES (?);", int64(i))
+			if err != nil {
+				db.Fatal(err)
+			}
+		}
+		stmt, err := db.PrepareContext(ctx, `SELECT id FROM query_context;`)
+		if err != nil {
+			b.Fatal(err)
+		}
+		b.Cleanup(func() { stmt.Close() })
+
+		var n int
+		for i := 0; i < b.N; i++ {
+			rows, err := stmt.QueryContext(ctx)
+			if err != nil {
+				b.Fatal(err)
+			}
+			for rows.Next() {
+				if err := rows.Scan(&n); err != nil {
+					b.Fatal(err)
+				}
+			}
+			if err := rows.Err(); err != nil {
+				b.Fatal(err)
+			}
+		}
+	}
+
+	// When the context does not have a Done channel we should use
+	// the fast path that directly handles the query instead of
+	// handling it in a goroutine. This benchmark also serves to
+	// highlight the performance impact of using a cancelable
+	// context.
+	b.Run("Background", func(b *testing.B) {
+		test(context.Background(), b)
+	})
+
+	// Benchmark a query with a context that can be canceled. This
+	// requires using a goroutine and is thus much slower.
+	b.Run("WithCancel", func(b *testing.B) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		test(ctx, b)
+	})
 }
 
 // benchmarkParams is benchmark for params
