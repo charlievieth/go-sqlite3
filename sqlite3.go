@@ -363,7 +363,7 @@ var SQLiteTimestampFormats = []string{
 }
 
 // This variable can be replaced with -ldflags like below:
-// go build -ldflags="-X 'github.com/mattn/go-sqlite3.driverName=my-sqlite3'"
+// go build -ldflags="-X 'github.com/charlievieth/go-sqlite3.driverName=my-sqlite3'"
 var driverName = "sqlite3"
 
 func init() {
