@@ -137,6 +137,59 @@ _sqlite3_prepare_v2_internal(sqlite3 *db, const char *zSql, int nBytes, sqlite3_
 }
 #endif
 
+#define GO_SQLITE_MULTIPLE_QUERIES -1
+
+// Our own implementation of ctype.h's isspace (for simplicity and to avoid
+// whatever locale shenanigans are involved with the Libc's isspace).
+static int _sqlite3_isspace(unsigned char c) {
+	return c == ' ' || c - '\t' < 5;
+}
+
+static int _sqlite3_prepare_query(sqlite3 *db, const char *zSql, int nBytes,
+	sqlite3_stmt **ppStmt, int *paramCount) {
+
+	const char *tail;
+	int rc = _sqlite3_prepare_v2_internal(db, zSql, nBytes, ppStmt, &tail);
+	if (rc != SQLITE_OK) {
+		return rc;
+	}
+	*paramCount = sqlite3_bind_parameter_count(*ppStmt);
+
+	// Check if the SQL query contains multiple statements.
+
+	// Trim leading space to handle queries with trailing whitespace.
+	// This can save us an additional call to sqlite3_prepare_v2.
+	const char *end = zSql + nBytes;
+	while (tail < end && _sqlite3_isspace(*tail)) {
+		tail++;
+	}
+	nBytes -= (tail - zSql);
+
+	// Attempt to parse the remaining SQL, if any.
+	if (nBytes > 0 && *tail) {
+		sqlite3_stmt *stmt;
+		rc = _sqlite3_prepare_v2_internal(db, tail, nBytes, &stmt, NULL);
+		if (rc != SQLITE_OK) {
+			// sqlite3 will return OK and a NULL statement if it was
+			goto error;
+		}
+		if (stmt != NULL) {
+			sqlite3_finalize(stmt);
+			rc = GO_SQLITE_MULTIPLE_QUERIES;
+			goto error;
+		}
+	}
+
+	// Ok, the SQL contained one valid statement.
+	return SQLITE_OK;
+
+error:
+	if (*ppStmt) {
+		sqlite3_finalize(*ppStmt);
+	}
+	return rc;
+}
+
 static int _sqlite3_prepare_v2(sqlite3 *db, const char *zSql, int nBytes, sqlite3_stmt **ppStmt, int *oBytes) {
 	const char *tail = NULL;
 	int rv = _sqlite3_prepare_v2_internal(db, zSql, nBytes, ppStmt, &tail);
@@ -1123,46 +1176,42 @@ func (c *SQLiteConn) Query(query string, args []driver.Value) (driver.Rows, erro
 	return c.query(context.Background(), query, list)
 }
 
+var closedRows = &SQLiteRows{s: &SQLiteStmt{closed: true}, closed: true}
+
 func (c *SQLiteConn) query(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
-	start := 0
-	for {
-		stmtArgs := make([]driver.NamedValue, 0, len(args))
-		s, err := c.prepare(ctx, query)
-		if err != nil {
-			return nil, err
+	s := SQLiteStmt{c: c, cls: true}
+	p := stringData(query)
+	var paramCount C.int
+	rv := C._sqlite3_prepare_query(c.db, (*C.char)(unsafe.Pointer(p)), C.int(len(query)), &s.s, &paramCount)
+	if rv != C.SQLITE_OK {
+		if rv == C.GO_SQLITE_MULTIPLE_QUERIES {
+			return nil, errors.New("query contains multiple SQL statements")
 		}
-		s.(*SQLiteStmt).cls = true
-		na := s.NumInput()
-		if len(args)-start < na {
-			s.Close()
-			return nil, fmt.Errorf("not enough args to execute query: want %d got %d", na, len(args)-start)
-		}
-		// consume the number of arguments used in the current
-		// statement and append all named arguments not contained
-		// therein
-		stmtArgs = append(stmtArgs, args[start:start+na]...)
-		for i := range args {
-			if (i < start || i >= na) && args[i].Name != "" {
-				stmtArgs = append(stmtArgs, args[i])
-			}
-		}
-		for i := range stmtArgs {
-			stmtArgs[i].Ordinal = i + 1
-		}
-		rows, err := s.(*SQLiteStmt).query(ctx, stmtArgs)
-		if err != nil && err != driver.ErrSkip {
-			s.Close()
-			return rows, err
-		}
-		start += na
-		tail := s.(*SQLiteStmt).t
-		if tail == "" {
-			return rows, nil
-		}
-		rows.Close()
-		s.Close()
-		query = tail
+		return nil, c.lastError()
 	}
+
+	// The sqlite3_stmt will be nil if the SQL was valid but did not
+	// contain a query. For now we're supporting this for the sake of
+	// backwards compatibility, but that may change in the future.
+	if s.s == nil {
+		return closedRows, nil
+	}
+
+	na := int(paramCount)
+	if n := len(args); n != na {
+		s.finalize()
+		if n < na {
+			return nil, fmt.Errorf("not enough args to execute query: want %d got %d", na, len(args))
+		}
+		return nil, fmt.Errorf("too many args to execute query: want %d got %d", na, len(args))
+	}
+
+	rows, err := s.query(ctx, args)
+	if err != nil && err != driver.ErrSkip {
+		s.finalize()
+		return rows, err
+	}
+	return rows, nil
 }
 
 // Begin transaction.

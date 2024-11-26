@@ -19,6 +19,7 @@ import (
 	"math/rand"
 	"net/url"
 	"os"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"runtime"
@@ -1203,6 +1204,163 @@ func TestQueryer(t *testing.T) {
 	}
 }
 
+func testQuery(t *testing.T, test func(t *testing.T, db *sql.DB)) {
+	db, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "test.sqlite3"))
+	if err != nil {
+		t.Fatal("Failed to open database:", err)
+	}
+	defer db.Close()
+
+	_, err = db.Exec(`
+		CREATE TABLE FOO (id INTEGER);
+		INSERT INTO foo(id) VALUES(?);
+		INSERT INTO foo(id) VALUES(?);
+		INSERT INTO foo(id) VALUES(?);
+	`, 3, 2, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Capture panic so tests can continue
+	defer func() {
+		if e := recover(); e != nil {
+			buf := make([]byte, 32*1024)
+			n := runtime.Stack(buf, false)
+			t.Fatalf("\npanic: %v\n\n%s\n", e, buf[:n])
+		}
+	}()
+	test(t, db)
+}
+
+func testQueryValues(t *testing.T, query string, args ...interface{}) []interface{} {
+	var values []interface{}
+	testQuery(t, func(t *testing.T, db *sql.DB) {
+		rows, err := db.Query(query, args...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rows == nil {
+			t.Fatal("nil rows")
+		}
+		for i := 0; rows.Next(); i++ {
+			if i > 1_000 {
+				t.Fatal("To many iterations of rows.Next():", i)
+			}
+			var v interface{}
+			if err := rows.Scan(&v); err != nil {
+				t.Fatal(err)
+			}
+			values = append(values, v)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		if err := rows.Close(); err != nil {
+			t.Fatal(err)
+		}
+	})
+	return values
+}
+
+func TestQuery(t *testing.T) {
+	queries := []struct {
+		query string
+		args  []interface{}
+	}{
+		{"SELECT id FROM foo ORDER BY id;", nil},
+		{"SELECT id FROM foo WHERE id != ? ORDER BY id;", []interface{}{4}},
+		{"SELECT id FROM foo WHERE id IN (?, ?, ?) ORDER BY id;", []interface{}{1, 2, 3}},
+
+		// Comments
+		{"SELECT id FROM foo ORDER BY id; -- comment", nil},
+		{"SELECT id FROM foo ORDER BY id -- comment", nil}, // Not terminated
+		{"SELECT id FROM foo ORDER BY id;\n -- comment\n", nil},
+		{
+			`-- FOO
+			 SELECT id FROM foo ORDER BY id; -- BAR
+			 /* BAZ */`,
+			nil,
+		},
+	}
+	want := []interface{}{
+		int64(1),
+		int64(2),
+		int64(3),
+	}
+	for _, q := range queries {
+		t.Run("", func(t *testing.T) {
+			got := testQueryValues(t, q.query, q.args...)
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("Query(%q, %v) = %v; want: %v", q.query, q.args, got, want)
+			}
+		})
+	}
+}
+
+func TestQueryNoSQL(t *testing.T) {
+	got := testQueryValues(t, "")
+	if got != nil {
+		t.Fatalf("Query(%q, %v) = %v; want: %v", "", nil, got, nil)
+	}
+}
+
+func testQueryError(t *testing.T, query string, args ...interface{}) {
+	testQuery(t, func(t *testing.T, db *sql.DB) {
+		rows, err := db.Query(query, args...)
+		if err == nil {
+			t.Error("Expected an error got:", err)
+		}
+		if rows != nil {
+			t.Error("Returned rows should be nil on error!")
+			// Attempt to iterate over rows to make sure they don't panic.
+			for i := 0; rows.Next(); i++ {
+				if i > 1_000 {
+					t.Fatal("To many iterations of rows.Next():", i)
+				}
+			}
+			if err := rows.Err(); err != nil {
+				t.Error(err)
+			}
+			rows.Close()
+		}
+	})
+}
+
+func TestQueryNotEnoughArgs(t *testing.T) {
+	testQueryError(t, "SELECT FROM foo WHERE id = ? OR id = ?);", 1)
+}
+
+func TestQueryTooManyArgs(t *testing.T) {
+	// TODO: test error message / kind
+	testQueryError(t, "SELECT FROM foo WHERE id = ?);", 1, 2)
+}
+
+func TestQueryMultipleStatements(t *testing.T) {
+	testQueryError(t, "SELECT 1; SELECT 2;")
+	testQueryError(t, "SELECT 1; SELECT 2; SELECT 3;")
+	testQueryError(t, "SELECT 1; ; SELECT 2;") // Empty statement in between
+	testQueryError(t, "SELECT 1; FOOBAR 2;")   // Error in second statement
+
+	// Test that multiple trailing semicolons (";;") are not an error
+	noError := func(t *testing.T, query string, args ...any) {
+		testQuery(t, func(t *testing.T, db *sql.DB) {
+			var n int64
+			if err := db.QueryRow(query, args...).Scan(&n); err != nil {
+				t.Fatal(err)
+			}
+			if n != 1 {
+				t.Fatalf("got: %d want: %d", n, 1)
+			}
+		})
+	}
+	noError(t, "SELECT 1; ;")
+	noError(t, "SELECT ?; ;", 1)
+}
+
+func TestQueryInvalidTable(t *testing.T) {
+	testQueryError(t, "SELECT COUNT(*) FROM does_not_exist;")
+}
+
 func TestStress(t *testing.T) {
 	tempFilename := TempFilename(t)
 	defer os.Remove(tempFilename)
@@ -2180,6 +2338,7 @@ var benchmarks = []testing.InternalBenchmark{
 	{Name: "BenchmarkExecContextStep", F: benchmarkExecContextStep},
 	{Name: "BenchmarkExecTx", F: benchmarkExecTx},
 	{Name: "BenchmarkQuery", F: benchmarkQuery},
+	{Name: "BenchmarkQuerySimple", F: benchmarkQuerySimple},
 	{Name: "BenchmarkQueryContext", F: benchmarkQueryContext},
 	{Name: "BenchmarkParams", F: benchmarkParams},
 	{Name: "BenchmarkStmt", F: benchmarkStmt},
@@ -2614,6 +2773,15 @@ func benchmarkQuery(b *testing.B) {
 		var s string
 		//		var t time.Time
 		if err := db.QueryRow("select null, 1, 1.1, 'foo'").Scan(&n, &i, &f, &s); err != nil {
+			panic(err)
+		}
+	}
+}
+
+func benchmarkQuerySimple(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		var n int
+		if err := db.QueryRow("select 1;").Scan(&n); err != nil {
 			panic(err)
 		}
 	}
