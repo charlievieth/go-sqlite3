@@ -565,16 +565,16 @@ type SQLiteResult struct {
 // six bits store the sqlite3 datatype.
 type columnType uint8
 
-// DeclType returns the declared type, which is currently GO_SQLITE3_DECL_DATE
+// declType returns the declared type, which is currently GO_SQLITE3_DECL_DATE
 // or GO_SQLITE3_DECL_BOOL, since those are the only two types that we need for
 // converting values.
-func (c columnType) DeclType() int {
+func (c columnType) declType() int {
 	return int(c) & C.GO_SQLITE3_DECL_MASK
 }
 
-// DataType returns the sqlite3 datatype code of the column, which is the
+// dataType returns the sqlite3 datatype code of the column, which is the
 // result of sqlite3_column_type.
-func (c columnType) DataType() int {
+func (c columnType) dataType() int {
 	return int(c) & C.GO_SQLITE3_TYPE_MASK
 }
 
@@ -2553,10 +2553,10 @@ func (rc *SQLiteRows) nextSyncLocked(dest []driver.Value) error {
 	C._sqlite3_column_types(rc.s.s, rc.colTypePtr(), C.int(rc.nc))
 
 	for i := range dest {
-		switch rc.coltype[i].DataType() {
+		switch rc.coltype[i].dataType() {
 		case C.SQLITE_INTEGER:
 			val := int64(C.sqlite3_column_int64(rc.s.s, C.int(i)))
-			switch rc.coltype[i].DeclType() {
+			switch rc.coltype[i].declType() {
 			case C.GO_SQLITE3_DECL_DATE:
 				var t time.Time
 				// Assume a millisecond unix timestamp if it's 13 digits -- too
@@ -2594,7 +2594,7 @@ func (rc *SQLiteRows) nextSyncLocked(dest []driver.Value) error {
 			// converting it to a Go string.
 			s := C.GoStringN((*C.char)(unsafe.Pointer(r.value)), r.bytes)
 
-			if rc.coltype[i].DeclType() == C.GO_SQLITE3_DECL_DATE {
+			if rc.coltype[i].declType() == C.GO_SQLITE3_DECL_DATE {
 				var err error
 				var t time.Time
 				s = strings.TrimSuffix(s, "Z")
