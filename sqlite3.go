@@ -2358,11 +2358,11 @@ func (s *SQLiteStmt) Exec(args []driver.Value) (driver.Result, error) {
 }
 
 func isInterruptErr(err error) bool {
-	sqliteErr, ok := err.(Error)
-	if ok {
-		return sqliteErr.Code == ErrInterrupt
+	if err == nil {
+		return false
 	}
-	return false
+	serr, ok := err.(Error)
+	return ok && serr.Code == ErrInterrupt
 }
 
 // exec executes a query that doesn't return rows. Attempts to honor context timeout.
