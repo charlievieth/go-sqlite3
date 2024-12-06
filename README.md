@@ -181,6 +181,8 @@ go build -tags "icu json1 fts5 secure_delete"
 | Tracing / Debug | sqlite_trace | Activate trace functions |
 | User Authentication | sqlite_userauth | SQLite User Authentication see [User Authentication](#user-authentication) for more information. |
 | Virtual Tables | sqlite_vtable | SQLite Virtual Tables see [SQLite Official VTABLE Documentation](https://www.sqlite.org/vtab.html) for more information, and a [full example here](https://github.com/charlievieth/go-sqlite3/tree/master/_example/vtable) |
+| Legacy Blob Assignment | sqlite_copy_bytes | Assign a copy of the BLOB into a []byte slice destination when scanning rows instead of a reference to the C memory. This was the previous behavior and should only be necessary for applications that use this library directly since the [database/sql](https://pkg.go.dev/database/sql) package creates a copy of the slice, unless the destination is [sql.RawBytes](https://pkg.go.dev/database/sql#RawBytes) |
+
 
 # Compilation
 

@@ -2577,7 +2577,23 @@ func (rc *SQLiteRows) nextSyncLocked(dest []driver.Value) error {
 			if r.bytes == 0 {
 				dest[i] = emptyBlob
 			} else {
-				dest[i] = C.GoBytes(unsafe.Pointer(r.value), r.bytes)
+				// The default is to not copy the bytes when assigning to dest
+				// because the database/sql package assumes the assigned bytes
+				// are a raw reference to a buffer internal to the database/driver
+				// and makes a copy of them.
+				//
+				// Previously, the mattn/go-sqlite3 always made a copy of the bytes.
+				// Programs that relied on that behavior (which will only be programs
+				// that invoke this driver directly instead of using the database/sql
+				// package) may need to set the "sqlite_copy_bytes" build tag if they
+				// relied on the bytes being assigned to dest to be a copy of the blob.
+				if !copyBytesOnAssignment {
+					// Pass a raw reference to the C memory.
+					dest[i] = unsafe.Slice((*byte)(unsafe.Pointer(r.value)), int(r.bytes))
+				} else {
+					// Create a copy of the BLOB.
+					dest[i] = C.GoBytes(unsafe.Pointer(r.value), r.bytes)
+				}
 			}
 		case C.SQLITE_NULL:
 			dest[i] = nil
