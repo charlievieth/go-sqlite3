@@ -50,6 +50,9 @@ jobs:
       - name: 'Tags: vacuum'
         run: go test -v -tags "sqlite_vacuum_full"
 
+      - name: 'Tags: copy bytes'
+        run: go test -v -tags "sqlite_copy_bytes"
+
       # - name: Upload coverage to Codecov
       #   uses: codecov/codecov-action@v1
       #   with:

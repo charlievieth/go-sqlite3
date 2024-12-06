@@ -2217,6 +2217,55 @@ func TestNamedParam(t *testing.T) {
 	}
 }
 
+func TestRawBytes(t *testing.T) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	const createTableStmt = `
+	CREATE TABLE IF NOT EXISTS raw_bytes (
+		data BLOB NOT NULL
+	);`
+	if _, err := db.Exec(createTableStmt); err != nil {
+		t.Fatal(err)
+	}
+	var want []string
+	for r := 'a'; r <= 'z'; r++ {
+		s := strings.Repeat(string(r), 64)
+		_, err := db.Exec(`INSERT INTO raw_bytes VALUES (?);`, []byte(s))
+		if err != nil {
+			t.Fatal(err)
+		}
+		want = append(want, s)
+	}
+
+	rows, err := db.Query(`SELECT data FROM raw_bytes;`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+
+	// TODO: test that assign a reference to raw.
+	var raw sql.RawBytes
+	for i := 0; rows.Next(); i++ {
+		if err := rows.Scan(&raw); err != nil {
+			t.Fatal(err)
+		}
+		if i >= len(want) {
+			fmt.Println("WAT:", i, string(raw))
+			continue
+		}
+		if string(raw) != want[i] {
+			t.Errorf("%d: got: %q want: %q", i, raw, want[i])
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 var customFunctionOnce sync.Once
 
 func BenchmarkCustomFunctions(b *testing.B) {
@@ -2345,6 +2394,7 @@ var benchmarks = []testing.InternalBenchmark{
 	{Name: "BenchmarkRows", F: benchmarkRows},
 	{Name: "BenchmarkStmtRows", F: benchmarkStmtRows},
 	{Name: "BenchmarkStmt10Cols", F: benchmarkStmt10Cols},
+	{Name: "BenchmarkScanRawBytes", F: benchmarkScanRawBytes},
 }
 
 func (db *TestDB) mustExec(sql string, args ...any) sql.Result {
@@ -2984,6 +3034,47 @@ func benchmarkStmt10Cols(b *testing.B) {
 		for rows.Next() {
 			err := rows.Scan(&v0, &v1, &v2, &v3, &v4, &v5, &v6, &v7, &v8, &v9)
 			if err != nil {
+				b.Fatal(err)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func benchmarkScanRawBytes(b *testing.B) {
+	const createTableStmt = `
+	CREATE TABLE IF NOT EXISTS scan_raw_bytes_benchmark (
+		data BLOB NOT NULL
+	);
+	DELETE FROM scan_raw_bytes_benchmark;`
+	if _, err := db.Exec(createTableStmt); err != nil {
+		b.Fatal(err)
+	}
+	for r := 'A'; r < 'A'+8; r++ {
+		s := strings.Repeat(string(r), 1024)
+		_, err := db.Exec(`INSERT INTO scan_raw_bytes_benchmark VALUES (?);`, []byte(s))
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+
+	stmt, err := db.Prepare(`SELECT data FROM scan_raw_bytes_benchmark;`)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer stmt.Close()
+	b.ResetTimer()
+
+	var raw sql.RawBytes
+	for i := 0; i < b.N; i++ {
+		rows, err := stmt.Query()
+		if err != nil {
+			b.Fatal(err)
+		}
+		for rows.Next() {
+			if err := rows.Scan(&raw); err != nil {
 				b.Fatal(err)
 			}
 		}
