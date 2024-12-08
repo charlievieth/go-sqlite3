@@ -2459,6 +2459,10 @@ func (rc *SQLiteRows) Columns() []string {
 	if rc.s.s != nil && int(rc.nc) != len(rc.cols) {
 		rc.cols = make([]string, rc.nc)
 		for i := 0; i < int(rc.nc); i++ {
+			// NB(CEV): I put a lot of effort into interning the column names
+			// but the performance hit was 1-5%. That said, it reduced allocs
+			// significantly. The important lesson here was to make the string
+			// pool per-connection to reduce lock contention.
 			rc.cols[i] = C.GoString(C.sqlite3_column_name(rc.s.s, C.int(i)))
 		}
 	}
