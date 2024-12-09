@@ -2396,6 +2396,7 @@ var benchmarks = []testing.InternalBenchmark{
 	{Name: "BenchmarkStmt10Cols", F: benchmarkStmt10Cols},
 	{Name: "BenchmarkScanRawBytes", F: benchmarkScanRawBytes},
 	{Name: "BenchmarkQueryParallel", F: benchmarkQueryParallel},
+	{Name: "BenchmarkOpen", F: benchmarkOpen},
 }
 
 func (db *TestDB) mustExec(sql string, args ...any) sql.Result {
@@ -3100,4 +3101,19 @@ func benchmarkQueryParallel(b *testing.B) {
 			}
 		}
 	})
+}
+
+func benchmarkOpen(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		db, err := sql.Open("sqlite3", ":memory:")
+		if err != nil {
+			b.Fatal(err)
+		}
+		if err := db.Ping(); err != nil {
+			b.Fatal(err)
+		}
+		if err := db.Close(); err != nil {
+			b.Fatal(err)
+		}
+	}
 }
