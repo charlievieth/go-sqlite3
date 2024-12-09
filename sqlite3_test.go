@@ -3104,12 +3104,10 @@ func benchmarkQueryParallel(b *testing.B) {
 }
 
 func benchmarkOpen(b *testing.B) {
+	var d SQLiteDriver
 	for i := 0; i < b.N; i++ {
-		db, err := sql.Open("sqlite3", ":memory:")
+		db, err := d.Open(":memory:")
 		if err != nil {
-			b.Fatal(err)
-		}
-		if err := db.Ping(); err != nil {
 			b.Fatal(err)
 		}
 		if err := db.Close(); err != nil {
