@@ -1710,15 +1710,17 @@ func (d *SQLiteDriver) Open(dsn string) (driver.Conn, error) {
 
 	var db *C.sqlite3
 	name := C.CString(dsn)
-	defer C.free(unsafe.Pointer(name))
 	var vfs *C.char
 	if vfsName != "" {
 		vfs = C.CString(vfsName)
-		defer C.free(unsafe.Pointer(vfs))
 	}
 	rv := C._sqlite3_open_v2(name, &db,
 		mutex|C.SQLITE_OPEN_READWRITE|C.SQLITE_OPEN_CREATE,
 		vfs)
+	C.free(unsafe.Pointer(name))
+	if vfs != nil {
+		C.free(unsafe.Pointer(vfs))
+	}
 	if rv != 0 {
 		// Save off the error _before_ closing the database.
 		// This is safe even if db is nil.
