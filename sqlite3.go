@@ -827,6 +827,9 @@ func (c *SQLiteConn) RegisterFunc(name string, impl any, pure bool) error {
 		numArgs--
 	}
 
+	if numArgs > 0 {
+		fi.argConverters = make([]callbackArgConverter, 0, numArgs)
+	}
 	for i := 0; i < numArgs; i++ {
 		conv, err := callbackArg(t.In(i))
 		if err != nil {
@@ -854,6 +857,10 @@ func (c *SQLiteConn) RegisterFunc(name string, impl any, pure bool) error {
 	fi.retConverter = conv
 
 	// fi must outlast the database connection, or we'll have dangling pointers.
+	if c.funcs == nil {
+		// We create 5 functions by default, but add room for a few more.
+		c.funcs = make([]*functionInfo, 0, 8)
+	}
 	c.funcs = append(c.funcs, &fi)
 
 	cname := C.CString(name)
@@ -1753,7 +1760,7 @@ func (d *SQLiteDriver) Open(dsn string) (driver.Conn, error) {
 	// and led to bugs because the database connection was not always closed.
 	err := func() error {
 		// Busy timeout
-		if err := exec(fmt.Sprintf("PRAGMA busy_timeout = %d;", busyTimeout)); err != nil {
+		if err := exec("PRAGMA busy_timeout = " + strconv.Itoa(busyTimeout) + ";"); err != nil {
 			return err
 		}
 
@@ -1898,7 +1905,7 @@ func (d *SQLiteDriver) Open(dsn string) (driver.Conn, error) {
 		// auto_vacuum needs to be set before any tables are created
 		// and activating user authentication creates the internal table `sqlite_user`.
 		if autoVacuum > -1 {
-			if err := exec(fmt.Sprintf("PRAGMA auto_vacuum = %d;", autoVacuum)); err != nil {
+			if err := exec("PRAGMA auto_vacuum = " + strconv.Itoa(autoVacuum) + ";"); err != nil {
 				return err
 			}
 		}
@@ -1926,35 +1933,35 @@ func (d *SQLiteDriver) Open(dsn string) (driver.Conn, error) {
 
 		// Case Sensitive LIKE
 		if caseSensitiveLike > -1 {
-			if err := exec(fmt.Sprintf("PRAGMA case_sensitive_like = %d;", caseSensitiveLike)); err != nil {
+			if err := exec("PRAGMA case_sensitive_like = " + strconv.Itoa(caseSensitiveLike) + ";"); err != nil {
 				return err
 			}
 		}
 
 		// Defer Foreign Keys
 		if deferForeignKeys > -1 {
-			if err := exec(fmt.Sprintf("PRAGMA defer_foreign_keys = %d;", deferForeignKeys)); err != nil {
+			if err := exec("PRAGMA defer_foreign_keys = " + strconv.Itoa(deferForeignKeys) + ";"); err != nil {
 				return err
 			}
 		}
 
 		// Foreign Keys
 		if foreignKeys > -1 {
-			if err := exec(fmt.Sprintf("PRAGMA foreign_keys = %d;", foreignKeys)); err != nil {
+			if err := exec("PRAGMA foreign_keys = " + strconv.Itoa(foreignKeys) + ";"); err != nil {
 				return err
 			}
 		}
 
 		// Ignore CHECK Constraints
 		if ignoreCheckConstraints > -1 {
-			if err := exec(fmt.Sprintf("PRAGMA ignore_check_constraints = %d;", ignoreCheckConstraints)); err != nil {
+			if err := exec("PRAGMA ignore_check_constraints = " + strconv.Itoa(ignoreCheckConstraints) + ";"); err != nil {
 				return err
 			}
 		}
 
 		// Journal Mode
 		if journalMode != "" {
-			if err := exec(fmt.Sprintf("PRAGMA journal_mode = %s;", journalMode)); err != nil {
+			if err := exec("PRAGMA journal_mode = " + journalMode + ";"); err != nil {
 				return err
 			}
 		}
@@ -1962,20 +1969,20 @@ func (d *SQLiteDriver) Open(dsn string) (driver.Conn, error) {
 		// Locking Mode
 		// Because the default is NORMAL and this is not changed in this package
 		// by using the compile time SQLITE_DEFAULT_LOCKING_MODE this PRAGMA can always be executed
-		if err := exec(fmt.Sprintf("PRAGMA locking_mode = %s;", lockingMode)); err != nil {
+		if err := exec("PRAGMA locking_mode = " + lockingMode + ";"); err != nil {
 			return err
 		}
 
 		// Query Only
 		if queryOnly > -1 {
-			if err := exec(fmt.Sprintf("PRAGMA query_only = %d;", queryOnly)); err != nil {
+			if err := exec("PRAGMA query_only = " + strconv.Itoa(queryOnly) + ";"); err != nil {
 				return err
 			}
 		}
 
 		// Recursive Triggers
 		if recursiveTriggers > -1 {
-			if err := exec(fmt.Sprintf("PRAGMA recursive_triggers = %d;", recursiveTriggers)); err != nil {
+			if err := exec("PRAGMA recursive_triggers = " + strconv.Itoa(recursiveTriggers) + ";"); err != nil {
 				return err
 			}
 		}
@@ -1986,7 +1993,7 @@ func (d *SQLiteDriver) Open(dsn string) (driver.Conn, error) {
 		// the default value for secureDelete var is 'DEFAULT' this way
 		// you can compile with secure_delete 'ON' and disable it for a specific database connection.
 		if secureDelete != "DEFAULT" {
-			if err := exec(fmt.Sprintf("PRAGMA secure_delete = %s;", secureDelete)); err != nil {
+			if err := exec("PRAGMA secure_delete = " + secureDelete + ";"); err != nil {
 				return err
 			}
 		}
@@ -1994,20 +2001,20 @@ func (d *SQLiteDriver) Open(dsn string) (driver.Conn, error) {
 		// Synchronous Mode
 		//
 		// Because default is NORMAL this statement is always executed
-		if err := exec(fmt.Sprintf("PRAGMA synchronous = %s;", synchronousMode)); err != nil {
+		if err := exec("PRAGMA synchronous = " + synchronousMode + ";"); err != nil {
 			return err
 		}
 
 		// Writable Schema
 		if writableSchema > -1 {
-			if err := exec(fmt.Sprintf("PRAGMA writable_schema = %d;", writableSchema)); err != nil {
+			if err := exec("PRAGMA writable_schema = " + strconv.Itoa(writableSchema) + ";"); err != nil {
 				return err
 			}
 		}
 
 		// Cache Size
 		if cacheSize != nil {
-			if err := exec(fmt.Sprintf("PRAGMA cache_size = %d;", *cacheSize)); err != nil {
+			if err := exec("PRAGMA cache_size = " + strconv.FormatInt(*cacheSize, 10) + ";"); err != nil {
 				return err
 			}
 		}
