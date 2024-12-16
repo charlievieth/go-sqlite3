@@ -1092,6 +1092,53 @@ func TestExecer(t *testing.T) {
 	}
 }
 
+func newTestDB(t testing.TB) *sql.DB {
+	// fmt.Sprintf("file:%s?mode=rwc", filename)
+	// ?mode=rwc
+	db, err := sql.Open("sqlite3", fmt.Sprintf("file:%s?mode=rwc", t.TempDir()+"/test.sqlite3"))
+	if err != nil {
+		t.Fatal("Failed to open database:", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return db
+}
+
+func assertTableExists(t testing.TB, db *sql.DB, name string) bool {
+	const query = `SELECT EXISTS (
+		SELECT 1 FROM sqlite_master WHERE type='table' AND name=?
+	);`
+	var exists bool
+	err := db.QueryRow(query, name).Scan(&exists)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !exists {
+		t.Errorf("no such table: %s", name)
+		return false
+	}
+	return true
+}
+
+func TestExecNoArgs(t *testing.T) {
+	tables := []string{
+		"tables_0",
+		"tables_1",
+		"tables_2",
+		"tables_3",
+	}
+	var execStmts []string
+	for _, name := range tables {
+		execStmts = append(execStmts, `CREATE TABLE `+name+` (id INTEGER PRIMARY KEY);`)
+	}
+	db := newTestDB(t)
+	if _, err := db.Exec(strings.Join(execStmts, "\n")); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range tables {
+		assertTableExists(t, db, name)
+	}
+}
+
 func TestExecDriverResult(t *testing.T) {
 	setup := func(t *testing.T) *sql.DB {
 		db, err := sql.Open("sqlite3", t.TempDir()+"/test.sqlite3")
@@ -2392,9 +2439,6 @@ func freeTestDB() {
 	}
 }
 
-// the following tables will be created and dropped during the test
-var testTables = []string{"foo", "bar", "t", "bench"}
-
 var tests = []testing.InternalTest{
 	{Name: "TestResult", F: testResult},
 	{Name: "TestBlobs", F: testBlobs},
@@ -2403,7 +2447,9 @@ var tests = []testing.InternalTest{
 	{Name: "TestManyQueryRow", F: testManyQueryRow},
 	{Name: "TestTxQuery", F: testTxQuery},
 	{Name: "TestPreparedStmt", F: testPreparedStmt},
+	{Name: "TestEmptyQuery", F: testEmptyQuery},
 	{Name: "TestExecEmptyQuery", F: testExecEmptyQuery},
+	{Name: "TestExecTrailingComment", F: testExecTrailingComment},
 }
 
 var benchmarks = []testing.InternalBenchmark{
@@ -2435,7 +2481,23 @@ func (db *TestDB) mustExec(sql string, args ...any) sql.Result {
 }
 
 func (db *TestDB) tearDown() {
-	for _, tbl := range testTables {
+	rows, err := db.Query(`SELECT name FROM sqlite_master;`)
+	if err != nil {
+		db.Fatal(err)
+	}
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			db.Fatal(err)
+		}
+		names = append(names, name)
+	}
+	if err := rows.Err(); err != nil {
+		db.Fatal(err)
+	}
+
+	for _, tbl := range names {
 		switch db.dialect {
 		case SQLITE:
 			db.mustExec("drop table if exists " + tbl)
@@ -2481,18 +2543,6 @@ func (db *TestDB) serialPK() string {
 		return "serial primary key"
 	case MYSQL:
 		return "integer primary key auto_increment"
-	}
-	panic("unknown dialect")
-}
-
-func (db *TestDB) now() string {
-	switch db.dialect {
-	case SQLITE:
-		return "datetime('now')"
-	case POSTGRESQL:
-		return "now()"
-	case MYSQL:
-		return "now()"
 	}
 	panic("unknown dialect")
 }
@@ -2745,7 +2795,7 @@ func testPreparedStmt(t *testing.T) {
 	wg.Wait()
 }
 
-// testEmptyQuery is test for validating the API in case of empty query
+// testExecEmptyQuery is test for validating the API in case of empty query
 func testExecEmptyQuery(t *testing.T) {
 	db.tearDown()
 	res, err := db.Exec(" -- this is just a comment ")
@@ -2762,6 +2812,64 @@ func testExecEmptyQuery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RowsAffected returned an error: %v", err)
 	}
+}
+
+// testEmptyQuery tests that Query works with empty SQL queries.
+func testEmptyQuery(t *testing.T) {
+	db.tearDown()
+	queries := []string{
+		"",
+		"/* */",
+		"--",
+		" -- this is just a comment ",
+	}
+	for i, query := range queries {
+		t.Run(strconv.Itoa(i), func(t *testing.T) {
+			t.Logf("Query: %q", query)
+
+			// Query is a no-op
+			t.Run("Query", func(t *testing.T) {
+				rows, err := db.Query(query)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for rows.Next() {
+					if err := rows.Scan(); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := rows.Err(); err != nil {
+					t.Fatal(err)
+				}
+			})
+
+			// QueryRow should return ErrNoRows since that is what the stdlib
+			// returns when the QueryRow returns no scannable columns.
+			t.Run("QueryRow", func(t *testing.T) {
+				err := db.QueryRow(query).Scan()
+				if !errors.Is(err, sql.ErrNoRows) {
+					t.Fatalf("Expected error %v got: %v", sql.ErrNoRows, err)
+				}
+			})
+		})
+	}
+}
+
+// Test that Exec'ing a valid SQL statement with a trailing comment does not
+// return an error.
+func testExecTrailingComment(t *testing.T) {
+	db.tearDown()
+	const stmt = `CREATE TABLE test_trailing_comment (
+		id INTEGER PRIMARY KEY
+	); -- this is just a comment;`
+	res, err := db.Exec(stmt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := res.RowsAffected(); err != nil {
+		t.Fatal(err)
+	}
+	assertTableExists(t, db.DB, "test_trailing_comment")
 }
 
 // Benchmarks need to use panic() since b.Error errors are lost when
