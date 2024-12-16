@@ -91,7 +91,7 @@ func (c *SQLiteConn) Authenticate(username, password string) error {
 	case C.SQLITE_OK:
 		return nil
 	default:
-		return c.lastError()
+		return c.lastError(int(rv))
 	}
 }
 
@@ -139,7 +139,7 @@ func (c *SQLiteConn) AuthUserAdd(username, password string, admin bool) error {
 	case C.SQLITE_OK:
 		return nil
 	default:
-		return c.lastError()
+		return c.lastError(int(rv))
 	}
 }
 
@@ -189,7 +189,7 @@ func (c *SQLiteConn) AuthUserChange(username, password string, admin bool) error
 	case C.SQLITE_OK:
 		return nil
 	default:
-		return c.lastError()
+		return c.lastError(int(rv))
 	}
 }
 
@@ -237,7 +237,7 @@ func (c *SQLiteConn) AuthUserDelete(username string) error {
 	case C.SQLITE_OK:
 		return nil
 	default:
-		return c.lastError()
+		return c.lastError(int(rv))
 	}
 }
 
