@@ -78,7 +78,6 @@ _sqlite3_bind_blob(sqlite3_stmt *stmt, int n, void *p, int np) {
   return sqlite3_bind_blob(stmt, n, p, np, SQLITE_TRANSIENT);
 }
 
-#include <stdio.h>
 #include <stdint.h>
 
 static int
@@ -141,7 +140,7 @@ _sqlite3_prepare_v2_internal(sqlite3 *db, const char *zSql, int nBytes, sqlite3_
 
 // Our own implementation of ctype.h's isspace (for simplicity and to avoid
 // whatever locale shenanigans are involved with the Libc's isspace).
-static int _sqlite3_isspace(unsigned char c) {
+static inline int _sqlite3_isspace(unsigned char c) {
 	return c == ' ' || c - '\t' < 5;
 }
 
@@ -209,6 +208,7 @@ static int _sqlite3_prepare_v2(sqlite3 *db, const char *zSql, int nBytes, sqlite
 // _sqlite3_exec_no_args executes all of the statements in zSql. None of the
 // statements are allowed to have positional arguments.
 int _sqlite3_exec_no_args(sqlite3 *db, const char *zSql, int nBytes, int64_t *rowid, int64_t *changes) {
+	const char *end = zSql + nBytes;
 	while (*zSql && nBytes > 0) {
 		sqlite3_stmt *stmt;
 		const char *tail;
@@ -226,12 +226,25 @@ int _sqlite3_exec_no_args(sqlite3 *db, const char *zSql, int nBytes, int64_t *ro
 		*changes = sqlite3_changes64(db);
 		*rowid = sqlite3_last_insert_rowid(db);
 
-		sqlite3_finalize(stmt);
+		int rv2 = sqlite3_finalize(stmt);
+		if (rv == SQLITE_OK) {
+			rv = rv2;
+		}
+
 		if (rv != SQLITE_OK && rv != SQLITE_DONE) {
+			// Handle statements that are empty or consist only of a comment.
+			if (rv == SQLITE_MISUSE && sqlite3_errcode(db) == 0) {
+				rv = SQLITE_OK;
+			}
 			return rv;
 		}
 
-		nBytes -= tail - zSql;
+		// Trim leading space to handle statements with trailing whitespace.
+		// This can save us an additional call to sqlite3_prepare_v2.
+		while (tail < end && _sqlite3_isspace(*tail)) {
+			tail++;
+		}
+		nBytes -= (tail - zSql);
 		zSql = tail;
 	}
 	return SQLITE_OK;
@@ -729,7 +742,7 @@ func (c *SQLiteConn) RegisterCollation(name string, cmp func(string, string) int
 	defer C.free(unsafe.Pointer(cname))
 	rv := C.sqlite3_create_collation(c.db, cname, C.SQLITE_UTF8, handle, (*[0]byte)(unsafe.Pointer(C.compareTrampoline)))
 	if rv != C.SQLITE_OK {
-		return c.lastError()
+		return c.lastError(int(rv))
 	}
 	return nil
 }
@@ -864,7 +877,7 @@ func (c *SQLiteConn) RegisterFunc(name string, impl any, pure bool) error {
 	}
 	rv := sqlite3CreateFunction(c.db, cname, C.int(numArgs), C.int(opts), newHandle(c, &fi), C.callbackTrampoline, nil, nil)
 	if rv != C.SQLITE_OK {
-		return c.lastError()
+		return c.lastError(int(rv))
 	}
 	return nil
 }
@@ -993,7 +1006,7 @@ func (c *SQLiteConn) RegisterAggregator(name string, impl any, pure bool) error 
 	}
 	rv := sqlite3CreateFunction(c.db, cname, C.int(stepNArgs), C.int(opts), newHandle(c, &ai), nil, C.stepTrampoline, C.doneTrampoline)
 	if rv != C.SQLITE_OK {
-		return c.lastError()
+		return c.lastError(int(rv))
 	}
 	return nil
 }
@@ -1005,32 +1018,38 @@ func (c *SQLiteConn) AutoCommit() bool {
 	return int(C.sqlite3_get_autocommit(c.db)) != 0
 }
 
-func (c *SQLiteConn) lastError() error {
-	return lastError(c.db)
+func (c *SQLiteConn) lastError(rv int) error {
+	return lastError(c.db, rv)
 }
 
-// Note: may be called with db == nil
-func lastError(db *C.sqlite3) error {
-	rv := C.sqlite3_errcode(db) // returns SQLITE_NOMEM if db == nil
-	if rv == C.SQLITE_OK {
+func lastError(db *C.sqlite3, rv int) error {
+	if rv == SQLITE_OK {
 		return nil
 	}
-	extrv := C.sqlite3_extended_errcode(db)    // returns SQLITE_NOMEM if db == nil
-	errStr := C.GoString(C.sqlite3_errmsg(db)) // returns "out of memory" if db == nil
+	extrv := rv
+	// Convert the extended result code to a basic result code.
+	rv &= ErrNoMask
 
 	// https://www.sqlite.org/c3ref/system_errno.html
 	// sqlite3_system_errno is only meaningful if the error code was SQLITE_CANTOPEN,
 	// or it was SQLITE_IOERR and the extended code was not SQLITE_IOERR_NOMEM
 	var systemErrno syscall.Errno
-	if rv == C.SQLITE_CANTOPEN || (rv == C.SQLITE_IOERR && extrv != C.SQLITE_IOERR_NOMEM) {
+	if db != nil && (rv == C.SQLITE_CANTOPEN ||
+		(rv == C.SQLITE_IOERR && extrv != C.SQLITE_IOERR_NOMEM)) {
 		systemErrno = syscall.Errno(C.sqlite3_system_errno(db))
 	}
 
+	var msg string
+	if db != nil {
+		msg = C.GoString(C.sqlite3_errmsg(db))
+	} else {
+		msg = errorString(extrv)
+	}
 	return Error{
 		Code:         ErrNo(rv),
 		ExtendedCode: ErrNoExtended(extrv),
 		SystemErrno:  systemErrno,
-		err:          errStr,
+		err:          msg,
 	}
 }
 
@@ -1069,7 +1088,7 @@ func (c *SQLiteConn) execArgs(ctx context.Context, query string, args []driver.N
 		rv := C._sqlite3_prepare_v2(c.db, (*C.char)(unsafe.Pointer(stringData(query))),
 			C.int(len(query)), &s.s, &sz)
 		if rv != C.SQLITE_OK {
-			return nil, c.lastError()
+			return nil, c.lastError(int(rv))
 		}
 		query = strings.TrimSpace(query[sz:])
 
@@ -1121,7 +1140,7 @@ func (c *SQLiteConn) execNoArgsSync(query string) (_ driver.Result, err error) {
 	rv := C._sqlite3_exec_no_args(c.db, (*C.char)(unsafe.Pointer(stringData(query))),
 		C.int(len(query)), &rowid, &changes)
 	if rv != C.SQLITE_OK {
-		err = c.lastError()
+		err = c.lastError(int(rv))
 	}
 	return &SQLiteResult{id: int64(rowid), changes: int64(changes)}, err
 }
@@ -1175,8 +1194,6 @@ func (c *SQLiteConn) Query(query string, args []driver.Value) (driver.Rows, erro
 	return c.query(context.Background(), query, list)
 }
 
-var closedRows = &SQLiteRows{s: &SQLiteStmt{closed: true}}
-
 func (c *SQLiteConn) query(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
 	s := SQLiteStmt{c: c, cls: true}
 	p := stringData(query)
@@ -1186,14 +1203,14 @@ func (c *SQLiteConn) query(ctx context.Context, query string, args []driver.Name
 		if rv == C.GO_SQLITE_MULTIPLE_QUERIES {
 			return nil, errors.New("query contains multiple SQL statements")
 		}
-		return nil, c.lastError()
+		return nil, c.lastError(int(rv))
 	}
 
 	// The sqlite3_stmt will be nil if the SQL was valid but did not
 	// contain a query. For now we're supporting this for the sake of
 	// backwards compatibility, but that may change in the future.
 	if s.s == nil {
-		return closedRows, nil
+		return &SQLiteRows{s: &SQLiteStmt{closed: true}}, nil
 	}
 
 	na := int(paramCount)
@@ -1720,7 +1737,7 @@ func (d *SQLiteDriver) Open(dsn string) (driver.Conn, error) {
 	if rv != 0 {
 		// Save off the error _before_ closing the database.
 		// This is safe even if db is nil.
-		err := lastError(db)
+		err := lastError(db, int(rv))
 		if db != nil {
 			C.sqlite3_close_v2(db)
 		}
@@ -1729,13 +1746,18 @@ func (d *SQLiteDriver) Open(dsn string) (driver.Conn, error) {
 	if db == nil {
 		return nil, errors.New("sqlite succeeded without returning a database")
 	}
+	rv = C.sqlite3_extended_result_codes(db, 1)
+	if rv != SQLITE_OK {
+		C.sqlite3_close_v2(db)
+		return nil, lastError(db, int(rv))
+	}
 
 	exec := func(s string) error {
 		cs := C.CString(s)
 		rv := C.sqlite3_exec(db, cs, nil, nil, nil)
 		C.free(unsafe.Pointer(cs))
 		if rv != C.SQLITE_OK {
-			return lastError(db)
+			return lastError(db, int(rv))
 		}
 		return nil
 	}
@@ -2044,7 +2066,7 @@ func (c *SQLiteConn) Close() (err error) {
 	runtime.SetFinalizer(c, nil)
 	rv := C.sqlite3_close_v2(c.db)
 	if rv != C.SQLITE_OK {
-		err = c.lastError()
+		err = lastError(nil, int(rv))
 	}
 	deleteHandles(c)
 	c.db = nil
@@ -2070,7 +2092,7 @@ func (c *SQLiteConn) prepare(ctx context.Context, query string) (driver.Stmt, er
 	var s *C.sqlite3_stmt
 	rv := C._sqlite3_prepare_v2_internal(c.db, (*C.char)(unsafe.Pointer(p)), C.int(len(query)), &s, nil)
 	if rv != C.SQLITE_OK {
-		return nil, c.lastError()
+		return nil, c.lastError(int(rv))
 	}
 	ss := &SQLiteStmt{c: c, s: s}
 	runtime.SetFinalizer(ss, (*SQLiteStmt).Close)
@@ -2138,7 +2160,7 @@ func (c *SQLiteConn) SetFileControlInt(dbName string, op int, arg int) error {
 	cArg := C.int(arg)
 	rv := C.sqlite3_file_control(c.db, cDBName, C.int(op), unsafe.Pointer(&cArg))
 	if rv != C.SQLITE_OK {
-		return c.lastError()
+		return c.lastError(int(rv))
 	}
 	return nil
 }
@@ -2161,7 +2183,7 @@ func (s *SQLiteStmt) Close() error {
 	}
 	rv := C.sqlite3_finalize(stmt)
 	if rv != C.SQLITE_OK {
-		return conn.lastError()
+		return conn.lastError(int(rv))
 	}
 	return nil
 }
@@ -2192,7 +2214,7 @@ func hasNamedArgs(args []driver.NamedValue) bool {
 func (s *SQLiteStmt) bind(args []driver.NamedValue) error {
 	rv := C.sqlite3_reset(s.s)
 	if rv != C.SQLITE_ROW && rv != C.SQLITE_OK && rv != C.SQLITE_DONE {
-		return s.c.lastError()
+		return s.c.lastError(int(rv))
 	}
 
 	if hasNamedArgs(args) {
@@ -2233,7 +2255,7 @@ func (s *SQLiteStmt) bind(args []driver.NamedValue) error {
 			rv = C._sqlite3_bind_text(s.s, n, (*C.char)(unsafe.Pointer(p)), C.int(len(ts)))
 		}
 		if rv != C.SQLITE_OK {
-			return s.c.lastError()
+			return s.c.lastError(int(rv))
 		}
 	}
 	return nil
@@ -2302,7 +2324,7 @@ func (s *SQLiteStmt) bindIndices(args []driver.NamedValue) error {
 				rv = C._sqlite3_bind_text(s.s, n, (*C.char)(unsafe.Pointer(p)), C.int(len(ts)))
 			}
 			if rv != C.SQLITE_OK {
-				return s.c.lastError()
+				return s.c.lastError(int(rv))
 			}
 		}
 	}
@@ -2412,7 +2434,7 @@ func (s *SQLiteStmt) execSync(args []driver.NamedValue) (driver.Result, error) {
 	var rowid, changes C.longlong
 	rv := C._sqlite3_step_row_internal(s.s, &rowid, &changes)
 	if rv != C.SQLITE_ROW && rv != C.SQLITE_OK && rv != C.SQLITE_DONE {
-		err := s.c.lastError()
+		err := s.c.lastError(int(rv))
 		C.sqlite3_reset(s.s)
 		C.sqlite3_clear_bindings(s.s)
 		return nil, err
@@ -2448,8 +2470,8 @@ func (rc *SQLiteRows) Close() error {
 	}
 	rv := C.sqlite3_reset(s.s)
 	if rv != C.SQLITE_OK {
-		s.mu.Unlock()
-		return s.c.lastError()
+		rc.s.mu.Unlock()
+		return rc.s.c.lastError(int(rv))
 	}
 	s.mu.Unlock()
 	return nil
@@ -2540,7 +2562,7 @@ func (rc *SQLiteRows) nextSyncLocked(dest []driver.Value) error {
 	if rv != C.SQLITE_ROW {
 		rv = C.sqlite3_reset(rc.s.s)
 		if rv != C.SQLITE_OK {
-			return rc.s.c.lastError()
+			return rc.s.c.lastError(int(rv))
 		}
 		return nil
 	}
