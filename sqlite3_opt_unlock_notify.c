@@ -4,7 +4,11 @@
 // license that can be found in the LICENSE file.
 
 #ifdef SQLITE_ENABLE_UNLOCK_NOTIFY
+#ifndef USE_LIBSQLITE3
 #include "sqlite3-binding.h"
+#else
+#include <sqlite3.h>
+#endif
 
 extern int unlock_notify_wait(sqlite3 *db);
 

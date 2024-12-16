@@ -78,7 +78,6 @@ _sqlite3_bind_blob(sqlite3_stmt *stmt, int n, void *p, int np) {
   return sqlite3_bind_blob(stmt, n, p, np, SQLITE_TRANSIENT);
 }
 
-#include <stdio.h>
 #include <stdint.h>
 
 static int
@@ -141,7 +140,7 @@ _sqlite3_prepare_v2_internal(sqlite3 *db, const char *zSql, int nBytes, sqlite3_
 
 // Our own implementation of ctype.h's isspace (for simplicity and to avoid
 // whatever locale shenanigans are involved with the Libc's isspace).
-static int _sqlite3_isspace(unsigned char c) {
+static inline int _sqlite3_isspace(unsigned char c) {
 	return c == ' ' || c - '\t' < 5;
 }
 
@@ -209,6 +208,7 @@ static int _sqlite3_prepare_v2(sqlite3 *db, const char *zSql, int nBytes, sqlite
 // _sqlite3_exec_no_args executes all of the statements in zSql. None of the
 // statements are allowed to have positional arguments.
 int _sqlite3_exec_no_args(sqlite3 *db, const char *zSql, int nBytes, int64_t *rowid, int64_t *changes) {
+	const char *end = zSql + nBytes;
 	while (*zSql && nBytes > 0) {
 		sqlite3_stmt *stmt;
 		const char *tail;
@@ -221,20 +221,30 @@ int _sqlite3_exec_no_args(sqlite3 *db, const char *zSql, int nBytes, int64_t *ro
 		do {
 			rv = _sqlite3_step_internal(stmt);
 		} while (rv == SQLITE_ROW);
-		if (rv != SQLITE_OK && rv != SQLITE_DONE) {
-			return rv;
-		}
 
 		// Only record the number of changes made by the last statement.
 		*changes = sqlite3_changes64(db);
 		*rowid = sqlite3_last_insert_rowid(db);
 
-		rv = sqlite3_finalize(stmt);
+		int rv2 = sqlite3_finalize(stmt);
+		if (rv == SQLITE_OK) {
+			rv = rv2;
+		}
+
 		if (rv != SQLITE_OK && rv != SQLITE_DONE) {
+			// Handle statements that are empty or consist only of a comment.
+			if (rv == SQLITE_MISUSE && sqlite3_errcode(db) == 0) {
+				rv = SQLITE_OK;
+			}
 			return rv;
 		}
 
-		nBytes -= tail - zSql;
+		// Trim leading space to handle statements with trailing whitespace.
+		// This can save us an additional call to sqlite3_prepare_v2.
+		while (tail < end && _sqlite3_isspace(*tail)) {
+			tail++;
+		}
+		nBytes -= (tail - zSql);
 		zSql = tail;
 	}
 	return SQLITE_OK;
@@ -1068,18 +1078,7 @@ func lastError(db *C.sqlite3, rv int) error {
 
 	var msg string
 	if db != nil {
-		// TODO: Get the DB's error code as well and combine calls
 		msg = C.GoString(C.sqlite3_errmsg(db))
-		// WARN: We need this check for Exec to return a nil error
-		// when the SQL statement is empty or simply a comment.
-		// That we need this special logic is likely indicative of
-		// a larger error with the logic here or in Exec.
-		if msg == "not an error" {
-			rv = int(C.sqlite3_errcode(db))
-			if rv == SQLITE_OK {
-				return nil
-			}
-		}
 	} else {
 		msg = errorString(extrv)
 	}
@@ -1232,8 +1231,6 @@ func (c *SQLiteConn) Query(query string, args []driver.Value) (driver.Rows, erro
 	return c.query(context.Background(), query, list)
 }
 
-var closedRows = &SQLiteRows{s: &SQLiteStmt{closed: true}}
-
 func (c *SQLiteConn) query(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
 	s := SQLiteStmt{c: c, cls: true}
 	p := stringData(query)
@@ -1250,7 +1247,7 @@ func (c *SQLiteConn) query(ctx context.Context, query string, args []driver.Name
 	// contain a query. For now we're supporting this for the sake of
 	// backwards compatibility, but that may change in the future.
 	if s.s == nil {
-		return closedRows, nil
+		return &SQLiteRows{s: &SQLiteStmt{closed: true}}, nil
 	}
 
 	na := int(paramCount)
