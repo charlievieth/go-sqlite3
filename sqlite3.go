@@ -1209,9 +1209,9 @@ func (c *SQLiteConn) query(ctx context.Context, query string, args []driver.Name
 	if n := len(args); n != na {
 		s.finalize()
 		if n < na {
-			return nil, fmt.Errorf("not enough args to execute query: want %d got %d", na, len(args))
+			return nil, fmt.Errorf("not enough args to execute query: want %d got %d", na, n)
 		}
-		return nil, fmt.Errorf("too many args to execute query: want %d got %d", na, len(args))
+		return nil, fmt.Errorf("too many args to execute query: want %d got %d", na, n)
 	}
 
 	rows, err := s.query(ctx, args)
