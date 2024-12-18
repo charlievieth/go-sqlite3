@@ -551,6 +551,7 @@ type SQLiteStmt struct {
 	s      *C.sqlite3_stmt
 	closed bool
 	cls    bool // True if the statement was created by SQLiteConn.Query
+	reset  bool // True if the statement needs to reset before re-use
 }
 
 // SQLiteResult implements sql.Result.
@@ -2199,15 +2200,20 @@ func hasNamedArgs(args []driver.NamedValue) bool {
 }
 
 func (s *SQLiteStmt) bind(args []driver.NamedValue) error {
-	rv := C.sqlite3_reset(s.s)
-	if rv != C.SQLITE_ROW && rv != C.SQLITE_OK && rv != C.SQLITE_DONE {
-		return s.c.lastError()
+	if s.reset {
+		rv := C.sqlite3_reset(s.s)
+		if rv != C.SQLITE_ROW && rv != C.SQLITE_OK && rv != C.SQLITE_DONE {
+			return s.c.lastError()
+		}
+	} else {
+		s.reset = true
 	}
 
 	if hasNamedArgs(args) {
 		return s.bindIndices(args)
 	}
 
+	var rv C.int
 	for _, arg := range args {
 		n := C.int(arg.Ordinal)
 		switch v := arg.Value.(type) {
