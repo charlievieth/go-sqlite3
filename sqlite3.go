@@ -382,6 +382,7 @@ type SQLiteStmt struct {
 	t      string
 	closed bool
 	cls    bool // True if the statement was created by SQLiteConn.Query
+	reset  bool // True if the statement needs to reset before re-use
 }
 
 // SQLiteResult implements sql.Result.
@@ -1922,9 +1923,13 @@ func (s *SQLiteStmt) NumInput() int {
 var placeHolder = []byte{0}
 
 func (s *SQLiteStmt) bind(args []driver.NamedValue) error {
-	rv := C.sqlite3_reset(s.s)
-	if rv != C.SQLITE_ROW && rv != C.SQLITE_OK && rv != C.SQLITE_DONE {
-		return s.c.lastError()
+	if s.reset {
+		rv := C.sqlite3_reset(s.s)
+		if rv != C.SQLITE_ROW && rv != C.SQLITE_OK && rv != C.SQLITE_DONE {
+			return s.c.lastError()
+		}
+	} else {
+		s.reset = true
 	}
 
 	bindIndices := make([][3]int, len(args))
@@ -1941,6 +1946,7 @@ func (s *SQLiteStmt) bind(args []driver.NamedValue) error {
 		}
 	}
 
+	var rv C.int
 	for i, arg := range args {
 		for j := range bindIndices[i] {
 			if bindIndices[i][j] == 0 {
