@@ -31,6 +31,8 @@ jobs:
           # Handle issues with the upgrade to icu4c v76.
           [[ -e "$(brew --prefix)/opt/icu4c" ]] || \
             brew reinstall icu4c
+      - if: startsWith(matrix.os, 'ubuntu')
+        run: sudo apt install -y libsqlite3-dev
 
       - uses: actions/setup-go@v2
         with:
