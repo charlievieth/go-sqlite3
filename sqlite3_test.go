@@ -2104,6 +2104,32 @@ func TestNonColumnString(t *testing.T) {
 	}
 }
 
+func TestConvertStringToBlob(t *testing.T) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if _, err := db.Exec(`CREATE TABLE blob_test (data BLOB NOT NULL);`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO blob_test VALUES (?);`, "hello"); err != nil {
+		t.Fatal(err)
+	}
+	var x any
+	if err := db.QueryRow(`SELECT data FROM blob_test LIMIT 1;`).Scan(&x); err != nil {
+		t.Fatal(err)
+	}
+	b, ok := x.([]byte)
+	if !ok {
+		t.Fatalf("Expected type %T got %T", []byte{}, x)
+	}
+	if string(b) != "hello" {
+		t.Fatalf("Expected value %q got %q", "hello", b)
+	}
+}
+
 func TestNilAndEmptyBytes(t *testing.T) {
 	db, err := sql.Open("sqlite3", ":memory:")
 	if err != nil {

@@ -304,8 +304,15 @@ static int sqlite3_system_errno(sqlite3 *db) {
 
 #define GO_SQLITE3_DECL_DATE (1 << 7)
 #define GO_SQLITE3_DECL_BOOL (1 << 6)
-#define GO_SQLITE3_DECL_MASK (GO_SQLITE3_DECL_DATE | GO_SQLITE3_DECL_BOOL)
-#define GO_SQLITE3_TYPE_MASK (GO_SQLITE3_DECL_BOOL - 1)
+#define GO_SQLITE3_DECL_BLOB (1 << 5)
+#define GO_SQLITE3_DECL_MASK (GO_SQLITE3_DECL_DATE | GO_SQLITE3_DECL_BOOL | GO_SQLITE3_DECL_BLOB)
+#define GO_SQLITE3_TYPE_MASK (GO_SQLITE3_DECL_BLOB - 1)
+
+#ifdef _Static_assert
+_Static_assert(
+	!(GO_SQLITE3_DECL_MASK & (SQLITE_INTEGER|SQLITE_FLOAT|SQLITE_BLOB|SQLITE_NULL|SQLITE3_TEXT)),
+	"Error: GO_SQLITE3_DECL_MASK clobbers the sqlite3 fundamental datatypes");
+#endif
 
 // _sqlite3_column_decltypes stores the declared column type in the typs array.
 // This function must always be called before _sqlite3_column_types since it
@@ -322,6 +329,8 @@ static void _sqlite3_column_decltypes(sqlite3_stmt* stmt, uint8_t *typs, int nty
 		case 'B':
 			if (!sqlite3_stricmp(typ, "boolean")) {
 				typs[i] = GO_SQLITE3_DECL_BOOL;
+			} else if (!sqlite3_stricmp(typ, "blob")) {
+				typs[i] = GO_SQLITE3_DECL_BLOB;
 			}
 			break;
 		case 'd':
@@ -2634,7 +2643,9 @@ func (rc *SQLiteRows) nextSyncLocked(dest []driver.Value) error {
 			dest[i] = nil
 		case C.SQLITE_TEXT:
 			r := C._sqlite3_column_text(rc.s.s, C.int(i))
-			if rc.coltype[i].declType() == C.GO_SQLITE3_DECL_DATE {
+			switch rc.coltype[i].declType() {
+			case C.GO_SQLITE3_DECL_DATE:
+				// Handle timestamps by parsing the raw sqlite3 bytes.
 				s := unsafeString((*byte)(unsafe.Pointer(r.value)), int(r.bytes))
 				s = strings.TrimSuffix(s, "Z")
 				var err error
@@ -2652,7 +2663,25 @@ func (rc *SQLiteRows) nextSyncLocked(dest []driver.Value) error {
 					t = t.In(rc.s.c.loc)
 				}
 				dest[i] = t
-			} else {
+			case C.GO_SQLITE3_DECL_BLOB:
+				// If the column's declared type is BLOB but the value is stored
+				// as TEXT, which can easily happen since this library uses the
+				// type of the argument to Exec as the data type, treat it as a
+				// BLOB. This can vastly improve performance when scanning a value
+				// into a byte slice or sql.RawBytes since it saves a copy. There
+				// is no performance impact if the destination is a string.
+				r := C._sqlite3_column_blob(rc.s.s, C.int(i))
+				if r.bytes == 0 {
+					dest[i] = emptyBlob
+				} else {
+					// See the above comments about byte slice assignment.
+					if !copyBytesOnAssignment {
+						dest[i] = unsafe.Slice((*byte)(unsafe.Pointer(r.value)), int(r.bytes))
+					} else {
+						dest[i] = C.GoBytes(unsafe.Pointer(r.value), r.bytes)
+					}
+				}
+			default:
 				dest[i] = C.GoStringN((*C.char)(unsafe.Pointer(r.value)), r.bytes)
 			}
 		}
