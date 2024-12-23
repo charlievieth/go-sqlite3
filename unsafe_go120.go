@@ -3,7 +3,10 @@
 
 package sqlite3
 
-import "unsafe"
+import (
+	"C"
+	"unsafe"
+)
 
 // stringData is a safe version of unsafe.StringData that handles empty strings.
 func stringData(s string) *byte {
@@ -14,4 +17,12 @@ func stringData(s string) *byte {
 	// The return value of unsafe.StringData
 	// is unspecified if the string is empty.
 	return &placeHolder[0]
+}
+
+// unsafeString converts ptr to a Go string.
+func unsafeString(ptr *byte, n int) string {
+	if ptr == nil || n <= 0 {
+		return ""
+	}
+	return C.GoStringN((*C.char)(unsafe.Pointer(ptr)), C.int(n))
 }

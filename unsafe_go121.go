@@ -21,3 +21,12 @@ func stringData(s string) *byte {
 	// is unspecified if the string is empty.
 	return &placeHolder[0]
 }
+
+// unsafeString returns a string value whose underlying bytes start at ptr and
+// whose length is n.
+func unsafeString(ptr *byte, n int) string {
+	if ptr == nil || n <= 0 {
+		return ""
+	}
+	return unsafe.String(ptr, n)
+}

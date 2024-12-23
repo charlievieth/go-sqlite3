@@ -2634,14 +2634,11 @@ func (rc *SQLiteRows) nextSyncLocked(dest []driver.Value) error {
 			dest[i] = nil
 		case C.SQLITE_TEXT:
 			r := C._sqlite3_column_text(rc.s.s, C.int(i))
-			// TODO: for dates we can just parse the raw *char without
-			// converting it to a Go string.
-			s := C.GoStringN((*C.char)(unsafe.Pointer(r.value)), r.bytes)
-
 			if rc.coltype[i].declType() == C.GO_SQLITE3_DECL_DATE {
+				s := unsafeString((*byte)(unsafe.Pointer(r.value)), int(r.bytes))
+				s = strings.TrimSuffix(s, "Z")
 				var err error
 				var t time.Time
-				s = strings.TrimSuffix(s, "Z")
 				for _, format := range SQLiteTimestampFormats {
 					if t, err = time.ParseInLocation(format, s, time.UTC); err == nil {
 						break
@@ -2656,7 +2653,7 @@ func (rc *SQLiteRows) nextSyncLocked(dest []driver.Value) error {
 				}
 				dest[i] = t
 			} else {
-				dest[i] = s
+				dest[i] = C.GoStringN((*C.char)(unsafe.Pointer(r.value)), r.bytes)
 			}
 		}
 	}

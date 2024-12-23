@@ -2397,6 +2397,7 @@ var benchmarks = []testing.InternalBenchmark{
 	{Name: "BenchmarkScanRawBytes", F: benchmarkScanRawBytes},
 	{Name: "BenchmarkQueryParallel", F: benchmarkQueryParallel},
 	{Name: "BenchmarkOpen", F: benchmarkOpen},
+	{Name: "BenchmarkParseTime", F: benchmarkParseTime},
 }
 
 func (db *TestDB) mustExec(sql string, args ...any) sql.Result {
@@ -3111,6 +3112,49 @@ func benchmarkOpen(b *testing.B) {
 			b.Fatal(err)
 		}
 		if err := db.Close(); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func benchmarkParseTime(b *testing.B) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE time_bench (ts DATETIME NOT NULL);`); err != nil {
+		b.Fatal(err)
+	}
+	// t := time.Date(year, month, day, hour, min, sec, nsec, loc)
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		b.Fatal(err)
+	}
+	ts := time.Date(2024, 1, 2, 15, 4, 5, 123456789, loc)
+	for i := 0; i < 8; i++ {
+		_, err := db.Exec(`INSERT INTO time_bench VALUES(?)`, ts)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+	stmt, err := db.Prepare(`SELECT ts FROM time_bench LIMIT 1;`)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer stmt.Close()
+	for i := 0; i < b.N; i++ {
+		rows, err := stmt.Query()
+		if err != nil {
+			b.Fatal(err)
+		}
+		var t time.Time
+		for rows.Next() {
+			if err := rows.Scan(&t); err != nil {
+				b.Fatal(err)
+			}
+		}
+		if err := rows.Err(); err != nil {
 			b.Fatal(err)
 		}
 	}
