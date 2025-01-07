@@ -432,6 +432,8 @@ import (
 	"syscall"
 	"time"
 	"unsafe"
+
+	"github.com/charlievieth/go-sqlite3/internal/timefmt"
 )
 
 // SQLiteTimestampFormats is timestamp formats understood by both this module
@@ -2290,9 +2292,8 @@ func (s *SQLiteStmt) bind(args []driver.NamedValue) error {
 				rv = C._sqlite3_bind_blob(s.s, n, unsafe.Pointer(&v[0]), C.int(ln))
 			}
 		case time.Time:
-			ts := v.Format(SQLiteTimestampFormats[0])
-			p := stringData(ts)
-			rv = C._sqlite3_bind_text(s.s, n, (*C.char)(unsafe.Pointer(p)), C.int(len(ts)))
+			b := timefmt.Format(v)
+			rv = C._sqlite3_bind_text(s.s, n, (*C.char)(unsafe.Pointer(&b[0])), C.int(len(b)))
 		}
 		if rv != C.SQLITE_OK {
 			return s.c.lastError(int(rv))
@@ -2359,9 +2360,8 @@ func (s *SQLiteStmt) bindIndices(args []driver.NamedValue) error {
 					rv = C._sqlite3_bind_blob(s.s, n, unsafe.Pointer(&v[0]), C.int(ln))
 				}
 			case time.Time:
-				ts := v.Format(SQLiteTimestampFormats[0])
-				p := stringData(ts)
-				rv = C._sqlite3_bind_text(s.s, n, (*C.char)(unsafe.Pointer(p)), C.int(len(ts)))
+				b := timefmt.Format(v)
+				rv = C._sqlite3_bind_text(s.s, n, (*C.char)(unsafe.Pointer(&b[0])), C.int(len(b)))
 			}
 			if rv != C.SQLITE_OK {
 				return s.c.lastError(int(rv))
