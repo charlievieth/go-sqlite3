@@ -274,3 +274,27 @@ func TestError_SystemErrno(t *testing.T) {
 		t.Errorf("expected SystemErrno to be a not exists error, but got %v", serr.SystemErrno)
 	}
 }
+
+func TestErrorStringCacheSize(t *testing.T) {
+	for i := 0; i < 50_000; i++ {
+		_ = errorString(i)
+	}
+	n := 0
+	o := 0
+	errStrCache.Range(func(_, v any) bool {
+		n++
+		return true
+	})
+	errStrCache.intern.Range(func(_, v any) bool {
+		o++
+		return true
+	})
+	if n > 1024 {
+		t.Fatalf("len(errStrCache) should be capped at %d got: %d", 1024, n)
+	}
+	if o > 128 {
+		// If sqlite3 adds a lot of new error messages this value
+		// will need to be increased.
+		t.Errorf("expected errStrMsgCache to be below %d got: %d", 128, o)
+	}
+}

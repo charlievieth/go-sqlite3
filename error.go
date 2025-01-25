@@ -15,6 +15,7 @@ package sqlite3
 import "C"
 import (
 	"sync"
+	"sync/atomic"
 	"syscall"
 )
 
@@ -152,7 +153,11 @@ const (
 	ErrWarningAutoIndex       = ErrNoExtended(ErrWarning | 1<<8)
 )
 
-var errStrCache sync.Map // int => string
+var errStrCache struct {
+	sync.Map               // int => string
+	size     atomic.Uint64 // size of cache
+	intern   sync.Map      // interned error messages: string => string
+}
 
 // errorString returns the result of sqlite3_errstr for result code rv,
 // which may be cached.
@@ -161,11 +166,24 @@ func errorString(rv int) string {
 		return v.(string)
 	}
 	s := C.GoString(C.sqlite3_errstr(C.int(rv)))
-	// Prevent the cache from growing unbounded by ignoring invalid
-	// error codes.
-	if s != "unknown error" {
+	if s == "unknown error" {
+		// Prevent the cache from growing unbounded by ignoring invalid
+		// error codes.
+		return "unknown error"
+	}
+	if v, loaded := errStrCache.intern.LoadOrStore(s, s); loaded {
+		s = v.(string)
+	}
+	// NB: This is limit is not precise and we may exceed
+	// it if this function is called concurrently.
+	//
+	// TODO: make the limit less than a power of 2 to reduce
+	// the chance that we resize the map if it is exceeded.
+	if errStrCache.size.Load() < 1024 {
 		if v, loaded := errStrCache.LoadOrStore(rv, s); loaded {
 			s = v.(string)
+		} else {
+			errStrCache.size.Add(1)
 		}
 	}
 	return s
