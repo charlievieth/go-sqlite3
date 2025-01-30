@@ -470,12 +470,22 @@ func init() {
 	}
 }
 
+var cachedVersion struct {
+	once     sync.Once
+	number   int
+	version  string
+	sourceID string
+}
+
 // Version returns SQLite library version information.
 func Version() (libVersion string, libVersionNumber int, sourceID string) {
-	libVersion = C.GoString(C.sqlite3_libversion())
-	libVersionNumber = int(C.sqlite3_libversion_number())
-	sourceID = C.GoString(C.sqlite3_sourceid())
-	return libVersion, libVersionNumber, sourceID
+	v := &cachedVersion
+	v.once.Do(func() {
+		v.number = int(C.sqlite3_libversion_number())
+		v.version = C.GoString(C.sqlite3_libversion())
+		v.sourceID = C.GoString(C.sqlite3_sourceid())
+	})
+	return v.version, v.number, v.sourceID
 }
 
 const (
