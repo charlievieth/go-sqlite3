@@ -602,12 +602,13 @@ type SQLiteTx struct {
 
 // SQLiteStmt implements driver.Stmt.
 type SQLiteStmt struct {
-	mu     sync.Mutex
-	c      *SQLiteConn
-	s      *C.sqlite3_stmt
-	closed bool
-	cls    bool // True if the statement was created by SQLiteConn.Query
-	reset  bool // True if the statement needs to reset before re-use
+	mu          sync.Mutex
+	c           *SQLiteConn
+	s           *C.sqlite3_stmt
+	namedParams map[string]int // Map of named parameter to index
+	closed      bool
+	cls         bool // True if the statement was created by SQLiteConn.Query
+	reset       bool // True if the statement needs to reset before re-use
 }
 
 // SQLiteResult implements sql.Result.
@@ -2328,8 +2329,35 @@ func (s *SQLiteStmt) bind(args []driver.NamedValue) error {
 	return nil
 }
 
-func (s *SQLiteStmt) bindIndices(args []driver.NamedValue) error {
-	// Find the longest named parameter name.
+func (s *SQLiteStmt) missingNamedParams(args []driver.NamedValue) bool {
+	for _, v := range args {
+		if v.Name != "" {
+			if _, ok := s.namedParams[v.Name]; !ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (s *SQLiteStmt) createBindIndices(args []driver.NamedValue) {
+	if len(args) == 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Check if we need to update or create the named params map.
+	// This check is necessary because a bad set of params could
+	// be passed to a prepared statement on its first invocation.
+	if !s.missingNamedParams(args) {
+		return
+	}
+	if s.namedParams == nil {
+		s.namedParams = make(map[string]int, len(args))
+	}
+
+	// Find the longest parameter name
 	n := 0
 	for _, v := range args {
 		if m := len(v.Name); m > n {
@@ -2338,60 +2366,75 @@ func (s *SQLiteStmt) bindIndices(args []driver.NamedValue) error {
 	}
 	buf := make([]byte, 0, n+2) // +2 for placeholder and null terminator
 
-	bindIndices := make([][3]int, len(args))
-	for i, v := range args {
-		bindIndices[i][0] = args[i].Ordinal
-		if v.Name != "" {
-			for j, c := range []byte{':', '@', '$'} {
-				buf = append(buf[:0], c)
-				buf = append(buf, v.Name...)
-				buf = append(buf, 0)
-				bindIndices[i][j] = int(C.sqlite3_bind_parameter_index(s.s, (*C.char)(unsafe.Pointer(&buf[0]))))
+	for _, v := range args {
+		if v.Name == "" {
+			continue
+		}
+		for _, c := range []byte{':', '@', '$'} {
+			buf = append(buf[:0], c)
+			buf = append(buf, v.Name...)
+			buf = append(buf, 0)
+			idx := int(C.sqlite3_bind_parameter_index(s.s, (*C.char)(unsafe.Pointer(&buf[0]))))
+			if idx != 0 {
+				s.namedParams[v.Name] = idx
+				break
 			}
-			args[i].Ordinal = bindIndices[i][0]
+		}
+	}
+}
+
+func (s *SQLiteStmt) bindIndices(args []driver.NamedValue) error {
+	s.createBindIndices(args)
+
+	bindIndices := make([]int, len(args))
+	for i, v := range args {
+		bindIndices[i] = args[i].Ordinal
+		if v.Name != "" {
+			// NB: Parameters with unrecognized names should be ignored:
+			// https://github.com/mattn/go-sqlite3/issues/697
+			bindIndices[i] = s.namedParams[v.Name]
+			args[i].Ordinal = bindIndices[i]
 		}
 	}
 
 	var rv C.int
 	for i, arg := range args {
-		for j := range bindIndices[i] {
-			if bindIndices[i][j] == 0 {
-				continue
+		if bindIndices[i] == 0 {
+			continue
+		}
+		n := C.int(bindIndices[i])
+		switch v := arg.Value.(type) {
+		case nil:
+			rv = C.sqlite3_bind_null(s.s, n)
+		case string:
+			p := stringData(v)
+			rv = C._sqlite3_bind_text(s.s, n, (*C.char)(unsafe.Pointer(p)), C.int(len(v)))
+		case int64:
+			rv = C.sqlite3_bind_int64(s.s, n, C.sqlite3_int64(v))
+		case bool:
+			val := 0
+			if v {
+				val = 1
 			}
-			n := C.int(bindIndices[i][j])
-			switch v := arg.Value.(type) {
-			case nil:
+			rv = C.sqlite3_bind_int(s.s, n, C.int(val))
+		case float64:
+			rv = C.sqlite3_bind_double(s.s, n, C.double(v))
+		case []byte:
+			if v == nil {
 				rv = C.sqlite3_bind_null(s.s, n)
-			case string:
-				p := stringData(v)
-				rv = C._sqlite3_bind_text(s.s, n, (*C.char)(unsafe.Pointer(p)), C.int(len(v)))
-			case int64:
-				rv = C.sqlite3_bind_int64(s.s, n, C.sqlite3_int64(v))
-			case bool:
-				val := 0
-				if v {
-					val = 1
+			} else {
+				ln := len(v)
+				if ln == 0 {
+					v = placeHolder
 				}
-				rv = C.sqlite3_bind_int(s.s, n, C.int(val))
-			case float64:
-				rv = C.sqlite3_bind_double(s.s, n, C.double(v))
-			case []byte:
-				if v == nil {
-					rv = C.sqlite3_bind_null(s.s, n)
-				} else {
-					ln := len(v)
-					if ln == 0 {
-						v = placeHolder
-					}
-					rv = C._sqlite3_bind_blob(s.s, n, unsafe.Pointer(&v[0]), C.int(ln))
-				}
-			case time.Time:
-				b := timefmt.Format(v)
-				rv = C._sqlite3_bind_text(s.s, n, (*C.char)(unsafe.Pointer(&b[0])), C.int(len(b)))
+				rv = C._sqlite3_bind_blob(s.s, n, unsafe.Pointer(&v[0]), C.int(ln))
 			}
-			if rv != C.SQLITE_OK {
-				return s.c.lastError(int(rv))
-			}
+		case time.Time:
+			b := timefmt.Format(v)
+			rv = C._sqlite3_bind_text(s.s, n, (*C.char)(unsafe.Pointer(&b[0])), C.int(len(b)))
+		}
+		if rv != C.SQLITE_OK {
+			return s.c.lastError(int(rv))
 		}
 	}
 	return nil
