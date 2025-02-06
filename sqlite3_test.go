@@ -1093,8 +1093,6 @@ func TestExecer(t *testing.T) {
 }
 
 func newTestDB(t testing.TB) *sql.DB {
-	// fmt.Sprintf("file:%s?mode=rwc", filename)
-	// ?mode=rwc
 	db, err := sql.Open("sqlite3", fmt.Sprintf("file:%s?mode=rwc", t.TempDir()+"/test.sqlite3"))
 	if err != nil {
 		t.Fatal("Failed to open database:", err)
@@ -2346,7 +2344,9 @@ func TestNamedParam(t *testing.T) {
 	}
 	defer db.Close()
 
-	_, err = db.Exec("drop table foo")
+	if _, err = db.Exec("drop table if exists foo"); err != nil {
+		t.Fatal(err)
+	}
 	_, err = db.Exec("create table foo (id integer, name text, amount integer)")
 	if err != nil {
 		t.Fatal("Failed to create table:", err)
@@ -2373,6 +2373,67 @@ func TestNamedParam(t *testing.T) {
 	rows.Scan(&id, &name, &amount)
 	if id != 2 || name != "grault" || amount != 123 {
 		t.Errorf("Expected %d, %q, %d for fetched result, but got %d, %q, %d:", 2, "grault", 123, id, name, amount)
+	}
+}
+
+func TestNamedParamReorder(t *testing.T) {
+	db := newTestDB(t)
+	const createTableStmt = `
+	CREATE TABLE IF NOT EXISTS test_named_params (
+		r0 INTEGER NOT NULL,
+		r1 INTEGER NOT NULL
+	);
+	DELETE FROM test_named_params;
+	INSERT INTO test_named_params VALUES (10, 11);
+	INSERT INTO test_named_params VALUES (20, 21);`
+
+	if _, err := db.Exec(createTableStmt); err != nil {
+		t.Fatal(err)
+	}
+
+	const query = `
+	SELECT
+		r0, r1
+	FROM
+		test_named_params
+	WHERE r0 = :v1 AND r1 = :v2;
+	`
+	stmt, err := db.Prepare(query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stmt.Close()
+
+	test := func(t testing.TB, arg1, arg2 sql.NamedArg, v1, v2 int64) {
+		t.Helper()
+		var i1, i2 int64
+		err := stmt.QueryRow(arg1, arg2).Scan(&i1, &i2)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		if i1 != v1 && i2 != v2 {
+			t.Errorf("got: v1=%d v2=%d want: v1=%d v2=%d", i1, i2, v1, v2)
+		}
+	}
+
+	// Deliberately add invalid named params to make sure that they
+	// don't poison the named param cache.
+	test(ignoreError{t}, sql.Named("v1", 10), sql.Named("foo", 11), 10, 11)
+	test(ignoreError{t}, sql.Named("bar", 10), sql.Named("foo", 11), 10, 11)
+
+	test(t, sql.Named("v1", 10), sql.Named("v2", 11), 10, 11)
+	test(t, sql.Named("v2", 11), sql.Named("v1", 10), 10, 11) // Reverse arg order
+
+	// Change argument values
+	test(t, sql.Named("v1", 20), sql.Named("v2", 21), 20, 21)
+	test(t, sql.Named("v2", 21), sql.Named("v1", 20), 20, 21) // Reverse arg order
+
+	// Extra argument should error
+	var v1, v2 int64
+	err = stmt.QueryRow(sql.Named("v1", 10), sql.Named("v2", 11), sql.Named("v3", 12)).Scan(&v1, &v2)
+	if err == nil {
+		t.Fatal(err)
 	}
 }
 
@@ -2555,6 +2616,7 @@ var benchmarks = []testing.InternalBenchmark{
 	{Name: "BenchmarkScanRawBytes", F: benchmarkScanRawBytes},
 	{Name: "BenchmarkQueryParallel", F: benchmarkQueryParallel},
 	{Name: "BenchmarkOpen", F: benchmarkOpen},
+	{Name: "BenchmarkNamedParams", F: benchmarkNamedParams},
 	{Name: "BenchmarkParseTime", F: benchmarkParseTime},
 }
 
@@ -3337,6 +3399,69 @@ func benchmarkOpen(b *testing.B) {
 	}
 }
 
+func benchmarkNamedParams(b *testing.B) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer db.Close()
+
+	const createTableStmt = `
+	DROP TABLE IF EXISTS bench_named_params;
+	VACUUM;
+	CREATE TABLE bench_named_params (
+		r0 INTEGER NOT NULL,
+		r1 INTEGER NOT NULL,
+		r2 INTEGER NOT NULL,
+		r3 INTEGER NOT NULL
+	);`
+	if _, err := db.Exec(createTableStmt); err != nil {
+		b.Fatal(err)
+	}
+	for i := int64(0); i < 1; i++ {
+		_, err := db.Exec("INSERT INTO bench_named_params VALUES (?, ?, ?, ?);", i, i, i, i)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+	// _, err = db.Exec("insert into foo(id, name, amount) values(:id, @name, $amount)",
+	const query = `
+	SELECT
+		r0
+	FROM
+		bench_named_params
+	WHERE
+		r0 >= :v0 AND r1 >= :v1 AND r2 >= :v2 AND r3 >= :v3;`
+
+	stmt, err := db.Prepare(query)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer stmt.Close()
+
+	args := []any{
+		sql.Named("v0", 0),
+		sql.Named("v1", 0),
+		sql.Named("v2", 0),
+		sql.Named("v3", 0),
+	}
+	for i := 0; i < b.N; i++ {
+		rows, err := stmt.Query(args...)
+		if err != nil {
+			b.Fatal(err)
+		}
+		var v int64
+		for rows.Next() {
+			if err := rows.Scan(&v); err != nil {
+				b.Fatal(err)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func benchmarkParseTime(b *testing.B) {
 	db, err := sql.Open("sqlite3", ":memory:")
 	if err != nil {
@@ -3378,4 +3503,33 @@ func benchmarkParseTime(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
+}
+
+var _ testing.TB = ignoreError{}
+
+// ignoreError prevents a testing.T from error'ing
+type ignoreError struct {
+	*testing.T
+}
+
+func (t ignoreError) FailNow() {}
+
+func (t ignoreError) Error(args ...any) {
+	t.Helper()
+	t.T.Log(args...)
+}
+
+func (t ignoreError) Errorf(format string, args ...any) {
+	t.Helper()
+	t.T.Logf(format, args...)
+}
+
+func (t ignoreError) Fatal(args ...any) {
+	t.Helper()
+	t.T.Log(args...)
+}
+
+func (t ignoreError) Fatalf(format string, args ...any) {
+	t.Helper()
+	t.T.Logf(format, args...)
 }
