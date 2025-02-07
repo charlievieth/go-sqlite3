@@ -346,9 +346,9 @@ static void _sqlite3_column_decltypes(sqlite3_stmt* stmt, uint8_t *typs, int nty
 		switch (typ[0]) {
 		case 'b':
 		case 'B':
-			if (!sqlite3_stricmp(typ, "boolean")) {
+			if ((typ[1] == 'o' || typ[1] == 'O') && !sqlite3_stricmp(typ, "boolean")) {
 				typs[i] = GO_SQLITE3_DECL_BOOL;
-			} else if (!sqlite3_stricmp(typ, "blob")) {
+			} else if ((typ[1] == 'l' || typ[1] == 'L') && !sqlite3_stricmp(typ, "blob")) {
 				typs[i] = GO_SQLITE3_DECL_BLOB;
 			}
 			break;
