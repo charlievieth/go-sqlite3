@@ -2756,9 +2756,11 @@ func (rc *SQLiteRows) nextSyncLocked(dest []driver.Value) error {
 				s = strings.TrimSuffix(s, "Z")
 				var err error
 				var t time.Time
-				for _, format := range SQLiteTimestampFormats {
-					if t, err = time.ParseInLocation(format, s, time.UTC); err == nil {
-						break
+				if t, err = timefmt.Parse(s, time.UTC); err != nil {
+					for _, format := range SQLiteTimestampFormats[2:] {
+						if t, err = time.ParseInLocation(format, s, time.UTC); err == nil {
+							break
+						}
 					}
 				}
 				if err != nil {
