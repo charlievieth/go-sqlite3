@@ -3468,7 +3468,17 @@ func benchmarkParseTime(b *testing.B) {
 		b.Fatal(err)
 	}
 	defer db.Close()
-	if _, err := db.Exec(`CREATE TABLE time_bench (ts DATETIME NOT NULL);`); err != nil {
+	const createTableStmt = `
+	CREATE TABLE time_bench (
+		ts1 DATETIME NOT NULL,
+		ts2 DATETIME NOT NULL,
+		ts3 DATETIME NOT NULL,
+		ts4 DATETIME NOT NULL,
+		ts5 DATETIME NOT NULL,
+		ts6 DATETIME NOT NULL
+	);`
+	// if _, err := db.Exec(`CREATE TABLE time_bench (ts DATETIME NOT NULL);`); err != nil {
+	if _, err := db.Exec(createTableStmt); err != nil {
 		b.Fatal(err)
 	}
 	// t := time.Date(year, month, day, hour, min, sec, nsec, loc)
@@ -3478,12 +3488,15 @@ func benchmarkParseTime(b *testing.B) {
 	}
 	ts := time.Date(2024, 1, 2, 15, 4, 5, 123456789, loc)
 	for i := 0; i < 8; i++ {
-		_, err := db.Exec(`INSERT INTO time_bench VALUES(?)`, ts)
+		_, err := db.Exec(`INSERT INTO time_bench VALUES(?, ?, ?, ?, ?, ?)`,
+			ts, ts, ts, ts, ts, ts)
 		if err != nil {
 			b.Fatal(err)
 		}
 	}
-	stmt, err := db.Prepare(`SELECT ts FROM time_bench LIMIT 1;`)
+
+	// stmt, err := db.Prepare(`SELECT ts1, ts2, ts3, ts4, ts5, ts6 FROM time_bench LIMIT 1;`)
+	stmt, err := db.Prepare(`SELECT ts1, ts2, ts3, ts4, ts5, ts6 FROM time_bench;`)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -3495,7 +3508,7 @@ func benchmarkParseTime(b *testing.B) {
 		}
 		var t time.Time
 		for rows.Next() {
-			if err := rows.Scan(&t); err != nil {
+			if err := rows.Scan(&t, &t, &t, &t, &t, &t); err != nil {
 				b.Fatal(err)
 			}
 		}
