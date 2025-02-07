@@ -7,9 +7,119 @@ go-sqlite3
 [![codecov](https://codecov.io/gh/mattn/go-sqlite3/branch/master/graph/badge.svg)](https://codecov.io/gh/mattn/go-sqlite3)
 [![Go Report Card](https://goreportcard.com/badge/github.com/charlievieth/go-sqlite3)](https://goreportcard.com/report/github.com/charlievieth/go-sqlite3)
 
-Latest stable version is v1.14 or later, not v2.
+# Note
 
-~~**NOTE:** The increase to v2 was an accident. There were no major changes or features.~~
+This a fork of [github.com/mattn/go-sqlite3](https://github.com/mattn/go-sqlite3/)
+that aims to be faster and more accurate. Performance wise, this library is
+about ~30% faster across the board, but significantly faster
+at calls to Exec (especially without args), and uses significantly less memory
+for all calls. Regarding accuracy, this library will return an error if a Query
+contains multiple SQL statements whereas the mattn/go-sqlite3 library will
+execute all of them, but only give you the results of the last SQL statement.
+
+Ideally, this fork would not exist, but given the challenge of getting PRs
+reviewed in the mainline repo I had no other alternative. Below are some of
+the PRs that I'd like to get merged into the mainline repo:
+
+* https://github.com/mattn/go-sqlite3/pull/1308
+* https://github.com/mattn/go-sqlite3/pull/1303
+* https://github.com/mattn/go-sqlite3/pull/1302
+* https://github.com/mattn/go-sqlite3/pull/1296
+* https://github.com/mattn/go-sqlite3/pull/1295
+* https://github.com/mattn/go-sqlite3/pull/1293
+* https://github.com/mattn/go-sqlite3/pull/1291
+
+<details>
+<summary>Benchmarks</summary>
+
+
+Benchmarks are between [github.com/mattn/go-sqlite3@v1.14.24](https://github.com/mattn/go-sqlite3/releases/tag/v1.14.24)
+and [github.com/charlievieth/go-sqlite3@2384c5b4ce](https://github.com/charlievieth/go-sqlite3/commit/2384c5b4cea23296d757a644315df113893db995).
+
+```
+
+goos: darwin
+goarch: arm64
+pkg: github.com/charlievieth/sqlite3-bench
+cpu: Apple M4 Pro
+                                          │ base.10.txt  │             new.10.txt              │
+                                          │    sec/op    │   sec/op     vs base                │
+Suite/BenchmarkExec/Params-14                939.9n ± 0%   747.5n ± 1%  -20.47% (p=0.000 n=10)
+Suite/BenchmarkExec/NoParams-14              845.8n ± 1%   533.3n ± 1%  -36.94% (p=0.000 n=10)
+Suite/BenchmarkExecContext/Params-14         1.919µ ± 0%   1.582µ ± 2%  -17.58% (p=0.000 n=10)
+Suite/BenchmarkExecContext/NoParams-14       1.754µ ± 1%   1.550µ ± 1%  -11.63% (p=0.000 n=10)
+Suite/BenchmarkExecStep-14                  1257.1µ ± 0%   465.0µ ± 2%  -63.01% (p=0.000 n=10)
+Suite/BenchmarkExecContextStep-14           2231.2µ ± 1%   463.3µ ± 1%  -79.24% (p=0.000 n=10)
+Suite/BenchmarkExecTx-14                     2.864µ ± 1%   1.649µ ± 2%  -42.44% (p=0.000 n=10)
+Suite/BenchmarkQuery-14                      2.401µ ± 0%   1.850µ ± 1%  -22.95% (p=0.000 n=10)
+Suite/BenchmarkQuerySimple-14                1.419µ ± 0%   1.049µ ± 1%  -26.05% (p=0.000 n=10)
+Suite/BenchmarkQueryContext/Background-14    2.518µ ± 0%   2.409µ ± 2%   -4.35% (p=0.001 n=10)
+Suite/BenchmarkQueryContext/WithCancel-14    9.099µ ± 2%   8.502µ ± 2%   -6.56% (p=0.000 n=10)
+Suite/BenchmarkParams-14                     2.662µ ± 1%   2.059µ ± 1%  -22.64% (p=0.000 n=10)
+Suite/BenchmarkStmt-14                       1.692µ ± 0%   1.441µ ± 1%  -14.86% (p=0.000 n=10)
+Suite/BenchmarkRows-14                       78.24µ ± 2%   53.30µ ± 3%  -31.88% (p=0.000 n=10)
+Suite/BenchmarkStmtRows-14                   76.93µ ± 1%   51.68µ ± 1%  -32.82% (p=0.000 n=10)
+Suite/BenchmarkStmt10Cols-14                 6.108µ ± 1%   4.491µ ± 1%  -26.47% (p=0.000 n=10)
+Suite/BenchmarkScanRawBytes-14               3.633µ ± 1%   2.517µ ± 1%  -30.73% (p=0.000 n=10)
+Suite/BenchmarkQueryParallel-14             1770.0n ± 2%   488.4n ± 2%  -72.41% (p=0.000 n=10)
+Suite/BenchmarkOpen-14                       15.84µ ± 1%   13.05µ ± 1%  -17.65% (p=0.000 n=10)
+Suite/BenchmarkNamedParams-14                2.636µ ± 1%   1.229µ ± 1%  -53.40% (p=0.000 n=10)
+Suite/BenchmarkParseTime-14                 15.005µ ± 1%   8.269µ ± 1%  -44.90% (p=0.000 n=10)
+geomean                                      7.235µ        4.599µ       -36.44%
+
+                                          │   base.10.txt   │               new.10.txt                │
+                                          │      B/op       │     B/op      vs base                   │
+Suite/BenchmarkExec/Params-14                    248.0 ± 0%     216.0 ± 0%   -12.90% (p=0.000 n=10)
+Suite/BenchmarkExec/NoParams-14                 128.00 ± 0%     64.00 ± 0%   -50.00% (p=0.000 n=10)
+Suite/BenchmarkExecContext/Params-14             408.0 ± 0%     375.5 ± 0%    -7.97% (p=0.000 n=10)
+Suite/BenchmarkExecContext/NoParams-14           288.0 ± 0%     208.0 ± 0%   -27.78% (p=0.000 n=10)
+Suite/BenchmarkExecStep-14                  5406668.00 ± 0%     64.00 ± 0%  -100.00% (p=0.000 n=10)
+Suite/BenchmarkExecContextStep-14            5566784.0 ± 0%     208.0 ± 0%  -100.00% (p=0.000 n=10)
+Suite/BenchmarkExecTx-14                         712.0 ± 0%     520.0 ± 0%   -26.97% (p=0.000 n=10)
+Suite/BenchmarkQuery-14                          688.0 ± 0%     656.0 ± 0%    -4.65% (p=0.000 n=10)
+Suite/BenchmarkQuerySimple-14                    456.0 ± 0%     456.0 ± 0%         ~ (p=1.000 n=10) ¹
+Suite/BenchmarkQueryContext/Background-14        400.0 ± 0%     396.0 ± 0%    -1.00% (p=0.000 n=10)
+Suite/BenchmarkQueryContext/WithCancel-14      2.374Ki ± 0%   1.016Ki ± 0%   -57.22% (p=0.000 n=10)
+Suite/BenchmarkParams-14                        1104.0 ± 0%     800.0 ± 0%   -27.54% (p=0.000 n=10)
+Suite/BenchmarkStmt-14                           920.0 ± 0%     784.0 ± 0%   -14.78% (p=0.000 n=10)
+Suite/BenchmarkRows-14                         9.305Ki ± 0%   6.062Ki ± 0%   -34.84% (p=0.000 n=10)
+Suite/BenchmarkStmtRows-14                     9.289Ki ± 0%   6.055Ki ± 0%   -34.82% (p=0.000 n=10)
+Suite/BenchmarkStmt10Cols-14                     992.0 ± 0%     712.0 ± 0%   -28.23% (p=0.000 n=10)
+Suite/BenchmarkScanRawBytes-14                  8776.0 ± 0%     592.0 ± 0%   -93.25% (p=0.000 n=10)
+Suite/BenchmarkQueryParallel-14                  592.0 ± 0%     548.0 ± 0%    -7.43% (p=0.000 n=10)
+Suite/BenchmarkOpen-14                           968.0 ± 0%     111.0 ± 1%   -88.53% (p=0.000 n=10)
+Suite/BenchmarkNamedParams-14                    664.0 ± 0%     600.0 ± 0%    -9.64% (p=0.000 n=10)
+Suite/BenchmarkParseTime-14                    4.117Ki ± 0%   1.713Ki ± 0%   -58.40% (p=0.000 n=10)
+geomean                                        2.222Ki          505.5        -77.78%
+¹ all samples are equal
+
+                                          │  base.10.txt  │             new.10.txt             │
+                                          │   allocs/op   │ allocs/op   vs base                │
+Suite/BenchmarkExec/Params-14                 10.000 ± 0%   8.000 ± 0%  -20.00% (p=0.000 n=10)
+Suite/BenchmarkExec/NoParams-14                7.000 ± 0%   4.000 ± 0%  -42.86% (p=0.000 n=10)
+Suite/BenchmarkExecContext/Params-14           12.00 ± 0%   10.00 ± 0%  -16.67% (p=0.000 n=10)
+Suite/BenchmarkExecContext/NoParams-14         9.000 ± 0%   6.000 ± 0%  -33.33% (p=0.000 n=10)
+Suite/BenchmarkExecStep-14                  7000.000 ± 0%   4.000 ± 0%  -99.94% (p=0.000 n=10)
+Suite/BenchmarkExecContextStep-14           9001.000 ± 0%   6.000 ± 0%  -99.93% (p=0.000 n=10)
+Suite/BenchmarkExecTx-14                       27.00 ± 0%   18.00 ± 0%  -33.33% (p=0.000 n=10)
+Suite/BenchmarkQuery-14                        23.00 ± 0%   22.00 ± 0%   -4.35% (p=0.000 n=10)
+Suite/BenchmarkQuerySimple-14                  14.00 ± 0%   13.00 ± 0%   -7.14% (p=0.000 n=10)
+Suite/BenchmarkQueryContext/Background-14      12.00 ± 0%   10.00 ± 0%  -16.67% (p=0.000 n=10)
+Suite/BenchmarkQueryContext/WithCancel-14      38.00 ± 0%   26.00 ± 0%  -31.58% (p=0.000 n=10)
+Suite/BenchmarkParams-14                       27.00 ± 0%   23.00 ± 0%  -14.81% (p=0.000 n=10)
+Suite/BenchmarkStmt-14                         25.00 ± 0%   23.00 ± 0%   -8.00% (p=0.000 n=10)
+Suite/BenchmarkRows-14                         525.0 ± 0%   418.0 ± 0%  -20.38% (p=0.000 n=10)
+Suite/BenchmarkStmtRows-14                     524.0 ± 0%   418.0 ± 0%  -20.23% (p=0.000 n=10)
+Suite/BenchmarkStmt10Cols-14                   39.00 ± 0%   19.00 ± 0%  -51.28% (p=0.000 n=10)
+Suite/BenchmarkScanRawBytes-14                 28.00 ± 0%   18.00 ± 0%  -35.71% (p=0.000 n=10)
+Suite/BenchmarkQueryParallel-14                16.00 ± 0%   15.00 ± 0%   -6.25% (p=0.000 n=10)
+Suite/BenchmarkOpen-14                        33.000 ± 0%   3.000 ± 0%  -90.91% (p=0.000 n=10)
+Suite/BenchmarkNamedParams-14                  15.00 ± 0%   13.00 ± 0%  -13.33% (p=0.000 n=10)
+Suite/BenchmarkParseTime-14                   124.00 ± 0%   64.00 ± 0%  -48.39% (p=0.000 n=10)
+geomean                                        49.44        17.04       -65.52%
+
+```
+</details>
 
 # Description
 
