@@ -15,6 +15,9 @@ var (
 	ErrAdminRequired = errors.New("SQLITE_AUTH: Unauthorized; Admin Privileges Required")
 )
 
+// NB: Even though userauth is no longer supported, we preserve
+// these methods to maintain backwards compatibility.
+
 // Authenticate will perform an authentication of the provided username
 // and password against the database.
 //
@@ -28,23 +31,12 @@ var (
 //
 // If the SQLITE_USER table is not present in the database file, then
 // this interface is a harmless no-op returnning SQLITE_OK.
+//
+// Deprecated: The sqlite3 ext/userauth module is [deprecated].
+//
+// [deprecated]: https://www.sqlite.org/src/artifact/ca7e9ee82ca4e1c
 func (c *SQLiteConn) Authenticate(username, password string) error {
-	// NOOP
 	return nil
-}
-
-// authenticate provides the actual authentication to SQLite.
-// This is not exported for usage in Go.
-// It is however exported for usage within SQL by the user.
-//
-// Returns:
-//
-//		C.SQLITE_OK (0)
-//		C.SQLITE_ERROR (1)
-//	 C.SQLITE_AUTH (23)
-func (c *SQLiteConn) authenticate(username, password string) int {
-	// NOOP
-	return 0
 }
 
 // AuthUserAdd can be used (by an admin user only)
@@ -55,28 +47,12 @@ func (c *SQLiteConn) authenticate(username, password string) int {
 // The AuthUserAdd only works for the "main" database, not
 // for any ATTACH-ed databases. Any call to AuthUserAdd by a
 // non-admin user results in an error.
+//
+// Deprecated: The sqlite3 ext/userauth module is [deprecated].
+//
+// [deprecated]: https://www.sqlite.org/src/artifact/ca7e9ee82ca4e1c
 func (c *SQLiteConn) AuthUserAdd(username, password string, admin bool) error {
-	// NOOP
 	return nil
-}
-
-// authUserAdd enables the User Authentication if not enabled.
-// Otherwise it will add a user.
-//
-// When user authentication is already enabled then this function
-// can only be called by an admin.
-//
-// This is not exported for usage in Go.
-// It is however exported for usage within SQL by the user.
-//
-// Returns:
-//
-//		C.SQLITE_OK (0)
-//		C.SQLITE_ERROR (1)
-//	 C.SQLITE_AUTH (23)
-func (c *SQLiteConn) authUserAdd(username, password string, admin int) int {
-	// NOOP
-	return 0
 }
 
 // AuthUserChange can be used to change a users
@@ -84,31 +60,12 @@ func (c *SQLiteConn) authUserAdd(username, password string, admin int) int {
 // login credentials.  Only an admin user can change another users login
 // credentials or admin privilege setting.  No user may change their own
 // admin privilege setting.
+//
+// Deprecated: The sqlite3 ext/userauth module is [deprecated].
+//
+// [deprecated]: https://www.sqlite.org/src/artifact/ca7e9ee82ca4e1c
 func (c *SQLiteConn) AuthUserChange(username, password string, admin bool) error {
-	// NOOP
 	return nil
-}
-
-// authUserChange allows to modify a user.
-// Users can change their own password.
-//
-// Only admins can change passwords for other users
-// and modify the admin flag.
-//
-// The admin flag of the current logged in user cannot be changed.
-// THis ensures that their is always an admin.
-//
-// This is not exported for usage in Go.
-// It is however exported for usage within SQL by the user.
-//
-// Returns:
-//
-//		C.SQLITE_OK (0)
-//		C.SQLITE_ERROR (1)
-//	 C.SQLITE_AUTH (23)
-func (c *SQLiteConn) authUserChange(username, password string, admin int) int {
-	// NOOP
-	return 0
 }
 
 // AuthUserDelete can be used (by an admin user only)
@@ -116,51 +73,19 @@ func (c *SQLiteConn) authUserChange(username, password string, admin int) int {
 // which guarantees that there is always an admin user and hence that
 // the database cannot be converted into a no-authentication-required
 // database.
+//
+// Deprecated: The sqlite3 ext/userauth module is [deprecated].
+//
+// [deprecated]: https://www.sqlite.org/src/artifact/ca7e9ee82ca4e1c
 func (c *SQLiteConn) AuthUserDelete(username string) error {
-	// NOOP
 	return nil
-}
-
-// authUserDelete can be used to delete a user.
-//
-// This function can only be executed by an admin.
-//
-// This is not exported for usage in Go.
-// It is however exported for usage within SQL by the user.
-//
-// Returns:
-//
-//		C.SQLITE_OK (0)
-//		C.SQLITE_ERROR (1)
-//	 C.SQLITE_AUTH (23)
-func (c *SQLiteConn) authUserDelete(username string) int {
-	// NOOP
-	return 0
 }
 
 // AuthEnabled checks if the database is protected by user authentication
+//
+// Deprecated: The sqlite3 ext/userauth module is [deprecated].
+//
+// [deprecated]: https://www.sqlite.org/src/artifact/ca7e9ee82ca4e1c
 func (c *SQLiteConn) AuthEnabled() (exists bool) {
-	// NOOP
 	return false
 }
-
-// authEnabled perform the actual check for user authentication.
-//
-// This is not exported for usage in Go.
-// It is however exported for usage within SQL by the user.
-//
-// Returns:
-//
-//		0 - Disabled
-//	 1 - Enabled
-func (c *SQLiteConn) authEnabled() int {
-	// NOOP
-	return 0
-}
-
-func (c *SQLiteConn) registerAuthFunc(_ string, _ any, _ bool) error {
-	// NOOP
-	return nil
-}
-
-// EOF

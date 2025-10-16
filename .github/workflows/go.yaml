@@ -19,7 +19,7 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
-        go: ['1.22', '1.23']
+        go: ['1.23', '1.24']
       fail-fast: false
     env:
       OS: ${{ matrix.os }}
@@ -46,8 +46,11 @@ jobs:
       - name: 'Tags: libsqlite3'
         run: go test -race -v -tags "libsqlite3"
 
+      - name: 'Tags: userauth deprecated'
+        run: make test_userauth_fails test_userauth_fails_libsqlite3
+
       - name: 'Tags: full'
-        run: go test -race -v -tags "sqlite_allow_uri_authority sqlite_app_armor sqlite_column_metadata sqlite_foreign_keys sqlite_fts5 sqlite_icu sqlite_introspect sqlite_json sqlite_math_functions sqlite_os_trace sqlite_preupdate_hook sqlite_secure_delete sqlite_see sqlite_stat4 sqlite_trace sqlite_unlock_notify sqlite_userauth sqlite_vacuum_incr sqlite_vtable"
+        run: go test -race -v -tags "sqlite_allow_uri_authority sqlite_app_armor sqlite_column_metadata sqlite_foreign_keys sqlite_fts5 sqlite_icu sqlite_introspect sqlite_json sqlite_math_functions sqlite_os_trace sqlite_preupdate_hook sqlite_secure_delete sqlite_see sqlite_stat4 sqlite_trace sqlite_unlock_notify sqlite_vacuum_incr sqlite_vtable"
 
       - name: 'Tags: vacuum'
         run: go test -v -tags "sqlite_vacuum_full"

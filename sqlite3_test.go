@@ -252,39 +252,37 @@ func TestForeignKeys(t *testing.T) {
 
 func TestDeferredForeignKey(t *testing.T) {
 	fname := TempFilename(t)
+	defer os.Remove(fname)
 	uri := "file:" + fname + "?_foreign_keys=1"
 	db, err := sql.Open("sqlite3", uri)
 	if err != nil {
-		os.Remove(fname)
-		t.Errorf("sql.Open(\"sqlite3\", %q): %v", uri, err)
+		t.Fatalf("sql.Open(\"sqlite3\", %q): %v", uri, err)
 	}
+	defer db.Close()
 	_, err = db.Exec("CREATE TABLE bar (id INTEGER PRIMARY KEY)")
 	if err != nil {
-		t.Errorf("failed creating tables: %v", err)
+		t.Fatalf("failed creating tables: %v", err)
 	}
 	_, err = db.Exec("CREATE TABLE foo (bar_id INTEGER, FOREIGN KEY(bar_id) REFERENCES bar(id) DEFERRABLE INITIALLY DEFERRED)")
 	if err != nil {
-		t.Errorf("failed creating tables: %v", err)
+		t.Fatalf("failed creating tables: %v", err)
 	}
 	tx, err := db.Begin()
 	if err != nil {
-		t.Errorf("Failed to begin transaction: %v", err)
+		t.Fatalf("Failed to begin transaction: %v", err)
 	}
 	_, err = tx.Exec("INSERT INTO foo (bar_id) VALUES (123)")
 	if err != nil {
-		t.Errorf("Failed to insert row: %v", err)
+		t.Fatalf("Failed to insert row: %v", err)
 	}
 	err = tx.Commit()
 	if err == nil {
-		t.Errorf("Expected an error: %v", err)
+		t.Fatalf("Expected an error: %v", err)
 	}
 	_, err = db.Begin()
 	if err != nil {
-		t.Errorf("Failed to begin transaction: %v", err)
+		t.Fatalf("Failed to begin transaction: %v", err)
 	}
-
-	db.Close()
-	os.Remove(fname)
 }
 
 func TestRecursiveTriggers(t *testing.T) {
@@ -1226,7 +1224,7 @@ func TestQueryer(t *testing.T) {
 		select id from foo order by id;
 	`)
 	if err != nil {
-		t.Error("Failed to call db.Query:", err)
+		t.Fatal("Failed to call db.Query:", err)
 	}
 	defer rows.Close()
 	n := 0
@@ -1427,7 +1425,7 @@ func TestStress(t *testing.T) {
 		for j := 0; j < 3; j++ {
 			rows, err := db.Query("select * from foo where id=1;")
 			if err != nil {
-				t.Error("Failed to call db.Query:", err)
+				t.Fatal("Failed to call db.Query:", err)
 			}
 			for rows.Next() {
 				var i int
