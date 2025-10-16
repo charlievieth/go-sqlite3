@@ -1906,64 +1906,10 @@ func (d *SQLiteDriver) Open(dsn string) (driver.Conn, error) {
 		}
 
 		// Preform Authentication
+		//
+		// NB: This will always fail if built with the "sqlite_userauth"
+		// build tag since user authentication is now deprecated.
 		if err := conn.Authenticate(authUser, authPass); err != nil {
-			return err
-		}
-
-		// Register: authenticate
-		// Authenticate will perform an authentication of the provided username
-		// and password against the database.
-		//
-		// If a database contains the SQLITE_USER table, then the
-		// call to Authenticate must be invoked with an
-		// appropriate username and password prior to enable read and write
-		//access to the database.
-		//
-		// Return SQLITE_OK on success or SQLITE_ERROR if the username/password
-		// combination is incorrect or unknown.
-		//
-		// If the SQLITE_USER table is not present in the database file, then
-		// this interface is a harmless no-op returnning SQLITE_OK.
-		if err := conn.registerAuthFunc("authenticate", conn.authenticate, true); err != nil {
-			return err
-		}
-		//
-		// Register: auth_user_add
-		// auth_user_add can be used (by an admin user only)
-		// to create a new user. When called on a no-authentication-required
-		// database, this routine converts the database into an authentication-
-		// required database, automatically makes the added user an
-		// administrator, and logs in the current connection as that user.
-		// The AuthUserAdd only works for the "main" database, not
-		// for any ATTACH-ed databases. Any call to AuthUserAdd by a
-		// non-admin user results in an error.
-		if err := conn.registerAuthFunc("auth_user_add", conn.authUserAdd, true); err != nil {
-			return err
-		}
-		//
-		// Register: auth_user_change
-		// auth_user_change can be used to change a users
-		// login credentials or admin privilege.  Any user can change their own
-		// login credentials. Only an admin user can change another users login
-		// credentials or admin privilege setting. No user may change their own
-		// admin privilege setting.
-		if err := conn.registerAuthFunc("auth_user_change", conn.authUserChange, true); err != nil {
-			return err
-		}
-		//
-		// Register: auth_user_delete
-		// auth_user_delete can be used (by an admin user only)
-		// to delete a user. The currently logged-in user cannot be deleted,
-		// which guarantees that there is always an admin user and hence that
-		// the database cannot be converted into a no-authentication-required
-		// database.
-		if err := conn.registerAuthFunc("auth_user_delete", conn.authUserDelete, true); err != nil {
-			return err
-		}
-
-		// Register: auth_enabled
-		// auth_enabled can be used to check if user authentication is enabled
-		if err := conn.registerAuthFunc("auth_enabled", conn.authEnabled, true); err != nil {
 			return err
 		}
 
@@ -1980,6 +1926,9 @@ func (d *SQLiteDriver) Open(dsn string) (driver.Conn, error) {
 		}
 
 		// Check if user wants to activate User Authentication
+		//
+		// NB: This will always fail if built with the "sqlite_userauth"
+		// build tag since user authentication is now deprecated.
 		if authCreate {
 			// Before going any further, we need to check that the user
 			// has provided an username and password within the DSN.
@@ -1992,8 +1941,7 @@ func (d *SQLiteDriver) Open(dsn string) (driver.Conn, error) {
 			}
 
 			// Check if User Authentication is Enabled
-			authExists := conn.AuthEnabled()
-			if !authExists {
+			if !conn.AuthEnabled() {
 				if err := conn.AuthUserAdd(authUser, authPass, true); err != nil {
 					return err
 				}

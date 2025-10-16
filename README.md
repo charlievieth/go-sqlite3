@@ -468,9 +468,20 @@ For example the TDM-GCC Toolchain can be found [here](https://jmeubank.github.io
 
 # User Authentication
 
-This package supports the SQLite User Authentication module.
+### ***This is deprecated***
+
+~~This package supports the SQLite User Authentication module.~~
+
+User authentication deprecated as of [#28](https://github.com/charlievieth/go-sqlite3/pull/28)
+and building with the `sqlite_userauth` tag will cause [`Open()`](https://pkg.go.dev/github.com/charlievieth/go-sqlite3#SQLiteDriver.Open)
+to fail.
+
+<details>
+<summary>Deprecated User Authentication</summary>
 
 ## Compile
+
+### WARN: THIS IS DEPRECATED
 
 To use the User authentication module, the package has to be compiled with the tag `sqlite_userauth`. See [Features](#features).
 
@@ -576,6 +587,8 @@ The following functions are available for User authentication from the `*SQLiteC
 ### Attached database
 
 When using attached databases, SQLite will use the authentication from the `main` database for the attached database(s).
+
+</details>
 
 # Extensions
 
