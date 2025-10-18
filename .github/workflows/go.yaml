@@ -24,6 +24,7 @@ jobs:
     env:
       OS: ${{ matrix.os }}
       GO: ${{ matrix.go }}
+      ALL_TAGS: 'sqlite_allow_uri_authority,sqlite_app_armor,sqlite_column_metadata,sqlite_foreign_keys,sqlite_fts5,sqlite_icu,sqlite_introspect,sqlite_json,sqlite_math_functions,sqlite_os_trace,sqlite_preupdate_hook,sqlite_secure_delete,sqlite_see,sqlite_stat4,sqlite_trace,sqlite_unlock_notify,sqlite_vacuum_incr,sqlite_vtable'
     steps:
       - if: startsWith(matrix.os, 'macos')
         run: |
@@ -50,7 +51,10 @@ jobs:
         run: make test_userauth_fails test_userauth_fails_libsqlite3
 
       - name: 'Tags: full'
-        run: go test -race -v -tags "sqlite_allow_uri_authority sqlite_app_armor sqlite_column_metadata sqlite_foreign_keys sqlite_fts5 sqlite_icu sqlite_introspect sqlite_json sqlite_math_functions sqlite_os_trace sqlite_preupdate_hook sqlite_secure_delete sqlite_see sqlite_stat4 sqlite_trace sqlite_unlock_notify sqlite_vacuum_incr sqlite_vtable"
+        run: go test -race -v -tags="${ALL_TAGS}"
+
+      - name: 'Tags: full libsqlite3'
+        run: go test -race -v -tags="${ALL_TAGS},libsqlite3"
 
       - name: 'Tags: vacuum'
         run: go test -v -tags "sqlite_vacuum_full"
