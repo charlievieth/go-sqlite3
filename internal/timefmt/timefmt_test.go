@@ -114,10 +114,18 @@ func BenchmarkFormat(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	ts := time.Date(2024, 1, 2, 15, 4, 5, 123456789, loc)
-	for i := 0; i < b.N; i++ {
-		_ = timefmt.Format(ts)
-	}
+	b.Run("Stdlib", func(b *testing.B) {
+		ts := time.Date(2024, 1, 2, 15, 4, 5, 123456789, loc)
+		for i := 0; i < b.N; i++ {
+			_ = ts.Format(sqlite3.SQLiteTimestampFormats[0])
+		}
+	})
+	b.Run("Timefmt", func(b *testing.B) {
+		ts := time.Date(2024, 1, 2, 15, 4, 5, 123456789, loc)
+		for i := 0; i < b.N; i++ {
+			_ = timefmt.Format(ts)
+		}
+	})
 }
 
 func BenchmarkParse(b *testing.B) {
