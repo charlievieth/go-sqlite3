@@ -52,7 +52,7 @@ test_all:
 # TODO: merge with the above target
 .PHONY: test_all_libsqlite3
 test_all_libsqlite3:
-	GOEXPERIMENT=cgocheck2 go test -tags "$(ALL_TEST_TAGS_JOINED),libsqlite3" -v
+	@GOEXPERIMENT=cgocheck2 go test -tags "$(ALL_TEST_TAGS_JOINED),libsqlite3" -v
 
 .PHONY: qtest
 qtest:
