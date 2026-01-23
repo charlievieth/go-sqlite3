@@ -13,6 +13,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path"
+	"sort"
 	"testing"
 )
 
@@ -80,7 +81,6 @@ func TestSqlLogicErrors(t *testing.T) {
 	if err.Error() != expectedErr {
 		t.Errorf("Unexpected error: %s, expected %s", err.Error(), expectedErr)
 	}
-
 }
 
 func TestExtendedErrorCodes_ForeignKey(t *testing.T) {
@@ -281,26 +281,42 @@ func TestError_SystemErrno(t *testing.T) {
 	}
 }
 
-func TestErrorStringCacheSize(t *testing.T) {
-	for i := 0; i < 50_000; i++ {
-		_ = errorString(i)
+func errorStringTestCodes() []int {
+	// Special cases
+	codes := []int{
+		100,                   // SQLITE_ROW
+		101,                   // SQLITE_DONE
+		int(ErrAbortRollback), // SQLITE_ABORT_ROLLBACK
 	}
-	n := 0
-	o := 0
-	errStrCache.Range(func(_, v any) bool {
-		n++
-		return true
-	})
-	errStrCache.intern.Range(func(_, v any) bool {
-		o++
-		return true
-	})
-	if n > 1024 {
-		t.Fatalf("len(errStrCache) should be capped at %d got: %d", 1024, n)
+	for code := 0; code < int(ErrWarning)+10; code++ {
+		codes = append(codes, code)
 	}
-	if o > 128 {
-		// If sqlite3 adds a lot of new error messages this value
-		// will need to be increased.
-		t.Errorf("expected errStrMsgCache to be below %d got: %d", 128, o)
+	sort.Ints(codes)
+	return codes
+}
+
+func TestErrorString(t *testing.T) {
+	for _, code := range errorStringTestCodes() {
+		got := errorString(code)
+		want := sqlite3ErrStr(code)
+		if got != want {
+			t.Errorf("errorString(%d) = %q; want: %q", code, got, want)
+		}
+	}
+}
+
+// Test that errorString caches valid results.
+func TestErrorStringCaching(t *testing.T) {
+	for _, code := range errorStringTestCodes() {
+		s1 := errorString(code)
+		s2 := errorString(code)
+		if p1, p2 := stringData(s1), stringData(s2); p1 != p2 {
+			kind := "valid"
+			if code > int(ErrWarning) {
+				kind = "invalid"
+			}
+			t.Errorf("Failed to cache %s sqlite3 error code %d (%q): got: %p want: %p",
+				kind, code, s1, p1, p2)
+		}
 	}
 }
