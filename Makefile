@@ -54,6 +54,16 @@ test_all:
 test_all_libsqlite3:
 	@GOEXPERIMENT=cgocheck2 go test -tags "$(ALL_TEST_TAGS_JOINED),libsqlite3" -v
 
+# Run tests with coverages then display in browser, if possible.
+.PHONY: cover
+cover:
+	@./scripts/gocover.bash -tags "$(ALL_TEST_TAGS_JOINED)"
+
+# Run tests with coverages then display in browser, if possible.
+.PHONY: cover_libsqlite3
+cover_libsqlite3:
+	@./scripts/gocover.bash -tags "$(ALL_TEST_TAGS_JOINED),libsqlite3"
+
 .PHONY: qtest
 qtest:
 	@GOEXPERIMENT=cgocheck2 go test -tags "libsqlite3"
