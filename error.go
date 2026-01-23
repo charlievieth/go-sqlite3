@@ -14,7 +14,6 @@ package sqlite3
 */
 import "C"
 import (
-	"sync"
 	"sync/atomic"
 	"syscall"
 )
@@ -153,38 +152,45 @@ const (
 	ErrWarningAutoIndex       = ErrNoExtended(ErrWarning | 1<<8)
 )
 
-var errStrCache struct {
-	sync.Map               // int => string
-	size     atomic.Uint64 // size of cache
-	intern   sync.Map      // interned error messages: string => string
-}
+// Cached results of sqlite3_errstr for common errors.
+// NB: this needs to be large enough to hold the last
+// common error (currently SQLITE_WARNING).
+var errStrCache [ErrWarning + 1]atomic.Pointer[string]
 
-// errorString returns the result of sqlite3_errstr for result code rv,
+// errorString returns the result of sqlite3_errstr for result code rc,
 // which may be cached.
-func errorString(rv int) string {
-	if v, ok := errStrCache.Load(rv); ok {
-		return v.(string)
+func errorString(rc int) string {
+	// Common error cases.
+	switch rc {
+	case C.SQLITE_ABORT_ROLLBACK:
+		return "abort due to ROLLBACK"
+	case C.SQLITE_ROW:
+		return "another row available"
+	case C.SQLITE_DONE:
+		return "no more rows available"
 	}
-	s := C.GoString(C.sqlite3_errstr(C.int(rv)))
+	if uint(rc) < uint(len(errStrCache)) {
+		if p := errStrCache[rc].Load(); p != nil {
+			return *p
+		}
+	}
+	s := sqlite3ErrStr(rc)
 	if s == "unknown error" {
 		// Prevent the cache from growing unbounded by ignoring invalid
 		// error codes.
 		return "unknown error"
 	}
-	if v, loaded := errStrCache.intern.LoadOrStore(s, s); loaded {
-		s = v.(string)
-	}
-	// NB: This is limit is not precise and we may exceed
-	// it if this function is called concurrently.
-	//
-	// TODO: make the limit less than a power of 2 to reduce
-	// the chance that we resize the map if it is exceeded.
-	if errStrCache.size.Load() < 1024 {
-		if v, loaded := errStrCache.LoadOrStore(rv, s); loaded {
-			s = v.(string)
-		} else {
-			errStrCache.size.Add(1)
-		}
+	if uint(rc) < uint(len(errStrCache)) {
+		// NB: There is a race here that could result in this store
+		// overwriting a valid value, but it is unlikely and fixing
+		// it is not worth the cost of the CAS operation, which can
+		// be expensive on some platforms.
+		errStrCache[rc].Store(&s)
 	}
 	return s
+}
+
+// This function is declared separately so that we can call it from test code.
+func sqlite3ErrStr(rc int) string {
+	return C.GoString(C.sqlite3_errstr(C.int(rc)))
 }
