@@ -157,9 +157,6 @@ func daysIn(m time.Month, year int) int {
 
 // isDigit reports whether s[i] is in range and is a decimal digit.
 func isDigit(s string, i int) bool {
-	if len(s) <= i {
-		return false
-	}
 	c := s[i]
 	return '0' <= c && c <= '9'
 }
