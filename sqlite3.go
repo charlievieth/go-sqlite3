@@ -405,21 +405,6 @@ static go_sqlite3_text_column _sqlite3_column_blob(sqlite3_stmt *stmt, int idx) 
 	}
 	return r;
 }
-
-typedef struct {
-	const char *msg;
-	int        code;
-} go_sqlite3_db_error;
-
-static go_sqlite3_db_error _sqlite3_db_error(sqlite3 *db) {
-	if (db) {
-		return (go_sqlite3_db_error){
-			.msg = sqlite3_errmsg(db),
-			.code = sqlite3_extended_errcode(db)
-		};
-	}
-	return (go_sqlite3_db_error){ 0 };
-}
 */
 import "C"
 import (
