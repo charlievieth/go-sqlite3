@@ -2571,16 +2571,29 @@ func (rc *SQLiteRows) Next(dest []driver.Value) error {
 	rc.s.mu.Lock()
 	defer rc.s.mu.Unlock()
 
+	row, err := rc.stepLocked()
+	if err != nil || !row || len(dest) == 0 {
+		return err
+	}
+	rc.loadColumnTypesLocked()
+	rc.scanRowLocked(dest)
+	return nil
+}
+
+// stepLocked advances the statement to the next row while honoring the
+// context passed to QueryContext. It returns io.EOF when there are no more
+// rows and reports whether a row is available. The mutex must be held.
+func (rc *SQLiteRows) stepLocked() (row bool, err error) {
 	if rc.s.closed {
-		return io.EOF
+		return false, io.EOF
 	}
 
 	done := rc.ctx.Done()
 	if done == nil {
-		return rc.nextSyncLocked(dest)
+		return rc.stepSyncLocked()
 	}
 	if err := rc.ctx.Err(); err != nil {
-		return err // Fast check if the channel is closed
+		return false, err // Fast check if the channel is closed
 	}
 
 	if rc.sema == nil {
@@ -2597,7 +2610,7 @@ func (rc *SQLiteRows) Next(dest []driver.Value) error {
 		}
 	}()
 
-	err := rc.nextSyncLocked(dest)
+	row, err = rc.stepSyncLocked()
 	// Signal the goroutine to exit. This send will only succeed at a point
 	// where it is impossible for the goroutine to call sqlite3_interrupt.
 	//
@@ -2608,7 +2621,24 @@ func (rc *SQLiteRows) Next(dest []driver.Value) error {
 	if err != nil && isInterruptErr(err) {
 		err = rc.ctx.Err()
 	}
-	return err
+	return row, err
+}
+
+// stepSyncLocked calls sqlite3_step and reports whether a row is available.
+// The mutex must be held.
+func (rc *SQLiteRows) stepSyncLocked() (row bool, err error) {
+	rv := C._sqlite3_step_internal(rc.s.s)
+	if rv == C.SQLITE_ROW {
+		return true, nil
+	}
+	if rv == C.SQLITE_DONE {
+		return false, io.EOF
+	}
+	rv = C.sqlite3_reset(rc.s.s)
+	if rv != C.SQLITE_OK {
+		return false, rc.s.c.lastError(int(rv))
+	}
+	return false, nil
 }
 
 func (rc *SQLiteRows) colTypePtr() *C.uint8_t {
@@ -2618,25 +2648,9 @@ func (rc *SQLiteRows) colTypePtr() *C.uint8_t {
 	return (*C.uint8_t)(unsafe.Pointer(&rc.coltype[0]))
 }
 
-var emptyBlob = []byte{}
-
-// nextSyncLocked moves cursor to next; must be called with locked mutex.
-func (rc *SQLiteRows) nextSyncLocked(dest []driver.Value) error {
-	rv := C._sqlite3_step_internal(rc.s.s)
-	if rv == C.SQLITE_DONE {
-		return io.EOF
-	}
-	if rv != C.SQLITE_ROW {
-		rv = C.sqlite3_reset(rc.s.s)
-		if rv != C.SQLITE_OK {
-			return rc.s.c.lastError(int(rv))
-		}
-		return nil
-	}
-	if len(dest) == 0 {
-		return nil
-	}
-
+// loadColumnTypesLocked populates rc.coltype with the declared and actual
+// datatype of each column of the current row. The mutex must be held.
+func (rc *SQLiteRows) loadColumnTypesLocked() {
 	if rc.coltype == nil {
 		rc.coltype = make([]columnType, rc.nc)
 		C._sqlite3_column_decltypes(rc.s.s, rc.colTypePtr(), C.int(rc.nc))
@@ -2644,27 +2658,124 @@ func (rc *SQLiteRows) nextSyncLocked(dest []driver.Value) error {
 	// Must call this each time since sqlite3 is loosely
 	// typed and the column types can vary between rows.
 	C._sqlite3_column_types(rc.s.s, rc.colTypePtr(), C.int(rc.nc))
+}
 
+var emptyBlob = []byte{}
+
+// The sqlite3 fundamental datatypes returned by columnType.dataType.
+const (
+	dataTypeInteger = C.SQLITE_INTEGER
+	dataTypeFloat   = C.SQLITE_FLOAT
+	dataTypeText    = C.SQLITE_TEXT
+	dataTypeBlob    = C.SQLITE_BLOB
+	dataTypeNull    = C.SQLITE_NULL
+)
+
+// The declared types returned by columnType.declType that require special
+// handling when converting values.
+const (
+	declTypeDate = C.GO_SQLITE3_DECL_DATE
+	declTypeBool = C.GO_SQLITE3_DECL_BOOL
+	declTypeBlob = C.GO_SQLITE3_DECL_BLOB
+)
+
+// columnInt64 returns the INTEGER value of column i.
+func (rc *SQLiteRows) columnInt64(i int) int64 {
+	return int64(C.sqlite3_column_int64(rc.s.s, C.int(i)))
+}
+
+// columnDouble returns the FLOAT value of column i.
+func (rc *SQLiteRows) columnDouble(i int) float64 {
+	return float64(C.sqlite3_column_double(rc.s.s, C.int(i)))
+}
+
+// columnText returns a pointer to the TEXT value of column i and its length
+// in bytes. The memory is owned by sqlite3 and is only valid until the
+// statement is stepped, reset, or finalized.
+func (rc *SQLiteRows) columnText(i int) (p *byte, n int) {
+	r := C._sqlite3_column_text(rc.s.s, C.int(i))
+	return (*byte)(unsafe.Pointer(r.value)), int(r.bytes)
+}
+
+// columnBlob returns the BLOB value of column i. The returned slice is a
+// reference to the C memory owned by sqlite3 unless the "sqlite_copy_bytes"
+// build tag is set.
+func (rc *SQLiteRows) columnBlob(i int) []byte {
+	r := C._sqlite3_column_blob(rc.s.s, C.int(i))
+	if r.bytes == 0 {
+		return emptyBlob
+	}
+	// The default is to not copy the bytes when assigning to dest
+	// because the database/sql package assumes the assigned bytes
+	// are a raw reference to a buffer internal to the database/driver
+	// and makes a copy of them.
+	//
+	// Previously, the mattn/go-sqlite3 always made a copy of the bytes.
+	// Programs that relied on that behavior (which will only be programs
+	// that invoke this driver directly instead of using the database/sql
+	// package) may need to set the "sqlite_copy_bytes" build tag if they
+	// relied on the bytes being assigned to dest to be a copy of the blob.
+	if !copyBytesOnAssignment {
+		// Pass a raw reference to the C memory.
+		return unsafe.Slice((*byte)(unsafe.Pointer(r.value)), int(r.bytes))
+	}
+	// Create a copy of the BLOB.
+	return C.GoBytes(unsafe.Pointer(r.value), r.bytes)
+}
+
+// unixTime converts an integer stored in a column with a declared type of
+// DATE, DATETIME, or TIMESTAMP into a time.Time.
+func (rc *SQLiteRows) unixTime(val int64) time.Time {
+	var t time.Time
+	// Assume a millisecond unix timestamp if it's 13 digits -- too
+	// large to be a reasonable timestamp in seconds.
+	if val > 1e12 || val < -1e12 {
+		val *= int64(time.Millisecond) // convert ms to nsec
+		t = time.Unix(0, val)
+	} else {
+		t = time.Unix(val, 0)
+	}
+	t = t.UTC()
+	if rc.s.c.loc != nil {
+		t = t.In(rc.s.c.loc)
+	}
+	return t
+}
+
+// parseTime parses the text stored in a column with a declared type of
+// DATE, DATETIME, or TIMESTAMP. The zero time is returned if s cannot
+// be parsed.
+func (rc *SQLiteRows) parseTime(s string) time.Time {
+	s = strings.TrimSuffix(s, "Z")
+	var err error
+	var t time.Time
+	if t, err = timefmt.Parse(s, time.UTC); err != nil {
+		for _, format := range SQLiteTimestampFormats[2:] {
+			if t, err = time.ParseInLocation(format, s, time.UTC); err == nil {
+				break
+			}
+		}
+	}
+	if err != nil {
+		// The column is a time value, so return the zero time on parse failure.
+		t = time.Time{}
+	}
+	if rc.s.c.loc != nil {
+		t = t.In(rc.s.c.loc)
+	}
+	return t
+}
+
+// scanRowLocked stores the values of the current row in dest. The mutex must
+// be held and loadColumnTypesLocked must have been called for the current row.
+func (rc *SQLiteRows) scanRowLocked(dest []driver.Value) {
 	for i := range dest {
 		switch rc.coltype[i].dataType() {
 		case C.SQLITE_INTEGER:
 			val := int64(C.sqlite3_column_int64(rc.s.s, C.int(i)))
 			switch rc.coltype[i].declType() {
 			case C.GO_SQLITE3_DECL_DATE:
-				var t time.Time
-				// Assume a millisecond unix timestamp if it's 13 digits -- too
-				// large to be a reasonable timestamp in seconds.
-				if val > 1e12 || val < -1e12 {
-					val *= int64(time.Millisecond) // convert ms to nsec
-					t = time.Unix(0, val)
-				} else {
-					t = time.Unix(val, 0)
-				}
-				t = t.UTC()
-				if rc.s.c.loc != nil {
-					t = t.In(rc.s.c.loc)
-				}
-				dest[i] = t
+				dest[i] = rc.unixTime(val)
 			case C.GO_SQLITE3_DECL_BOOL:
 				dest[i] = val > 0
 			default:
@@ -2673,54 +2784,15 @@ func (rc *SQLiteRows) nextSyncLocked(dest []driver.Value) error {
 		case C.SQLITE_FLOAT:
 			dest[i] = float64(C.sqlite3_column_double(rc.s.s, C.int(i)))
 		case C.SQLITE_BLOB:
-			r := C._sqlite3_column_blob(rc.s.s, C.int(i))
-			if r.bytes == 0 {
-				dest[i] = emptyBlob
-			} else {
-				// The default is to not copy the bytes when assigning to dest
-				// because the database/sql package assumes the assigned bytes
-				// are a raw reference to a buffer internal to the database/driver
-				// and makes a copy of them.
-				//
-				// Previously, the mattn/go-sqlite3 always made a copy of the bytes.
-				// Programs that relied on that behavior (which will only be programs
-				// that invoke this driver directly instead of using the database/sql
-				// package) may need to set the "sqlite_copy_bytes" build tag if they
-				// relied on the bytes being assigned to dest to be a copy of the blob.
-				if !copyBytesOnAssignment {
-					// Pass a raw reference to the C memory.
-					dest[i] = unsafe.Slice((*byte)(unsafe.Pointer(r.value)), int(r.bytes))
-				} else {
-					// Create a copy of the BLOB.
-					dest[i] = C.GoBytes(unsafe.Pointer(r.value), r.bytes)
-				}
-			}
+			dest[i] = rc.columnBlob(i)
 		case C.SQLITE_NULL:
 			dest[i] = nil
 		case C.SQLITE_TEXT:
-			r := C._sqlite3_column_text(rc.s.s, C.int(i))
 			switch rc.coltype[i].declType() {
 			case C.GO_SQLITE3_DECL_DATE:
 				// Handle timestamps by parsing the raw sqlite3 bytes.
-				s := unsafeString((*byte)(unsafe.Pointer(r.value)), int(r.bytes))
-				s = strings.TrimSuffix(s, "Z")
-				var err error
-				var t time.Time
-				if t, err = timefmt.Parse(s, time.UTC); err != nil {
-					for _, format := range SQLiteTimestampFormats[2:] {
-						if t, err = time.ParseInLocation(format, s, time.UTC); err == nil {
-							break
-						}
-					}
-				}
-				if err != nil {
-					// The column is a time value, so return the zero time on parse failure.
-					t = time.Time{}
-				}
-				if rc.s.c.loc != nil {
-					t = t.In(rc.s.c.loc)
-				}
-				dest[i] = t
+				r := C._sqlite3_column_text(rc.s.s, C.int(i))
+				dest[i] = rc.parseTime(unsafeString((*byte)(unsafe.Pointer(r.value)), int(r.bytes)))
 			case C.GO_SQLITE3_DECL_BLOB:
 				// If the column's declared type is BLOB but the value is stored
 				// as TEXT, which can easily happen since this library uses the
@@ -2728,21 +2800,11 @@ func (rc *SQLiteRows) nextSyncLocked(dest []driver.Value) error {
 				// BLOB. This can vastly improve performance when scanning a value
 				// into a byte slice or sql.RawBytes since it saves a copy. There
 				// is no performance impact if the destination is a string.
-				r := C._sqlite3_column_blob(rc.s.s, C.int(i))
-				if r.bytes == 0 {
-					dest[i] = emptyBlob
-				} else {
-					// See the above comments about byte slice assignment.
-					if !copyBytesOnAssignment {
-						dest[i] = unsafe.Slice((*byte)(unsafe.Pointer(r.value)), int(r.bytes))
-					} else {
-						dest[i] = C.GoBytes(unsafe.Pointer(r.value), r.bytes)
-					}
-				}
+				dest[i] = rc.columnBlob(i)
 			default:
+				r := C._sqlite3_column_text(rc.s.s, C.int(i))
 				dest[i] = C.GoStringN((*C.char)(unsafe.Pointer(r.value)), r.bytes)
 			}
 		}
 	}
-	return nil
 }
